@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.catalyst.optimizer
 
+import org.apache.spark.sql.catalyst.planning.ExtractEquiJoinKeys
+
 import scala.collection.immutable.HashSet
 import org.apache.spark.sql.catalyst.analysis.{CleanupAliases, EliminateSubQueries}
 import org.apache.spark.sql.catalyst.expressions._
@@ -29,6 +31,8 @@ import org.apache.spark.sql.catalyst.plans.LeftSemi
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules._
 import org.apache.spark.sql.types._
+
+import scala.collection.mutable
 
 abstract class Optimizer extends RuleExecutor[LogicalPlan]
 
@@ -285,6 +289,176 @@ object ColumnPruning extends Rule[LogicalPlan] {
     } else {
       c
     }
+}
+
+/**
+  * Utility data structure to track the nullability of attributes return by each operator.
+  */
+class NonNullabilityMap {
+  case class Attr(a: Attribute) {
+    override def equals(o: Any): Boolean = o match {
+      case other: Attr => a.semanticEquals(other.a)
+      case _ => false
+    }
+    override val hashCode: Int = a.semanticHash()
+  }
+
+  val nonNullableAttributes = mutable.HashMap.empty[LogicalPlan, mutable.HashSet[Attr]]
+
+  def add(p: LogicalPlan, a: Attribute): Unit = {
+    if (a.nullable) {
+      if (nonNullableAttributes.contains(p)) {
+        nonNullableAttributes.get(p).get.add(Attr(a))
+      } else {
+        val attrs = mutable.HashSet.empty[Attr]
+        attrs.add(Attr(a))
+        nonNullableAttributes.put(p, attrs)
+      }
+    }
+  }
+
+  def nonNullable(p: LogicalPlan): mutable.HashSet[Attribute] = {
+    if (nonNullableAttributes.contains(p)) {
+      nonNullableAttributes.get(p).get.map(_.a)
+    } else {
+      mutable.HashSet.empty[Attribute]
+    }
+  }
+
+  def isNonNullable(p: LogicalPlan, a: Attribute): Boolean = {
+    if (nonNullableAttributes.contains(p)) {
+      return nonNullableAttributes.get(p).get.contains(Attr(a))
+    }
+    return false
+  }
+
+  override def toString: String = {
+    nonNullableAttributes.toString()
+  }
+}
+
+/**
+  * This passes tries to maximize the number of operators that have non-nullable attributes. This
+  * is done by inferring when attributes cannot be NULL (e.g. the child has a filter that
+  * guarantees this) and adding `attr IS NOT NULL` filters lower in the plan.
+  *
+  * This is useful in two ways.
+  *  1. Eliminate values early on, for example in joins where one side contains a lot of NULL
+  *     values.
+  *  2. Non-nullable attributes should make the engine more efficient as NULL checks in expressions
+  *     are expensive. With codegen and non-nullablility, we can elide many of those checks.
+  */
+object PropagateNonNullability extends Rule[LogicalPlan] with PredicateHelper {
+  def apply(plan: LogicalPlan): LogicalPlan = {
+    System.out.println("Plan:")
+    System.out.println(plan)
+    // Foreach operator, we compute the set of attributes this operator returns that cannot be
+    // NULL. This does *not* mean that while evaluating the operator, the value is non-nullable.
+    // For example:
+    // Agg
+    //  Project
+    //    Join (inner, t1.a = t2.b)
+    //      Scan
+    //    Scan
+    // After the first step, this map will t1.a and t2.b as both are implicitly non-nullable
+    // because of the join condition.
+    val nonNullableAttributes = new NonNullabilityMap()
+    plan.foreach { p => p match {
+      case Filter(condition, child) =>
+        val attributes = extractNonNullableAttributes(splitConjunctivePredicates(condition))
+        attributes.foreach { a => nonNullableAttributes.add(p, a) }
+
+      // TODO: handle other joins types (left and right outer)
+      case Join(left, right, Inner, Some(joinCondition)) => {
+        val joinKeys = ExtractEquiJoinKeys.unapply(p)
+        if (joinKeys.isDefined) {
+          val leftKeys = joinKeys.get._2
+          val rightKeys = joinKeys.get._3
+          (leftKeys ++ rightKeys).foreach { e => e match {
+            case a: Attribute => nonNullableAttributes.add(p, a)
+          }}
+        }
+      }
+      case _ =>
+    }}
+    println("Step 1 attributes:\n" + nonNullableAttributes)
+    println
+
+
+    // Next, we will push the non-nullability *down*. The rationale is that if this operator
+    // isn't going to return NULLs anyway, there is no point to have it consume NULLs. This is
+    // similar to predicate push down.
+    // After this step:
+    // Agg
+    //  Project
+    //    Join (inner, t1.a = t2.b, non-nullable)
+    //      Filter (t2.a is not null, non-nullable)
+    //      Scan
+    //    Filter (t1.a is not null, non-nullable)
+    //    Scan
+    val pushedDownPlan = plan transform {
+      // TODO: other nodes.
+      case j @ Join(left: LeafNode, right: LeafNode, Inner, condition) => {
+        val lNonNullable: Seq[Attribute] =
+          left.output.filter { a => nonNullableAttributes.isNonNullable(j, a)}
+        val rNonNullable: Seq[Attribute] =
+          right.output.filter { a => nonNullableAttributes.isNonNullable(j, a)}
+
+        var leftFilter: Filter = null
+        var rightFilter: Filter = null
+        // Add IS NOT NULL filters and mark the attributes are non-nullable
+        if (!lNonNullable.isEmpty) {
+          leftFilter = Filter(lNonNullable.map(IsNotNull(_)).reduce(And), left)
+          lNonNullable.foreach { a => nonNullableAttributes.add(leftFilter, a)}
+        }
+        if (!rNonNullable.isEmpty) {
+          rightFilter = Filter(rNonNullable.map(IsNotNull(_)).reduce(And), right)
+          rNonNullable.foreach { a => nonNullableAttributes.add(rightFilter, a)}
+        }
+
+        if (leftFilter == null && rightFilter == null) {
+          j
+        } else {
+          Join(leftFilter, rightFilter, Inner, condition)
+        }
+      }
+    }
+
+    println("Step 2 attributes:\n" + nonNullableAttributes)
+    println
+
+    // In the final step, we will bubble the non-nullability *up* the tree. If the operator below
+    // you produced non-null attributes, the operator can elide NULL checking will *consuming* the
+    // attribute. For codegen, in particular, skipping these checks is very beneficial.
+    // This step replaces operator in the tree with the non-null version of the attributes as
+    // needed.
+    // Using the running example, this results in:
+    // After this step:
+    // Agg (t1.a, t2.b non-nullable)
+    //  Project (t1.a, t2.b non-nullabe)
+    //    Join (inner, t1.a = t2.b, non-nullable)
+    //      Filter (t2.a is not null, non-nullable)
+    //      Scan
+    //    Filter (t1.a is not null, non-nullable)
+    //    Scan
+    // TODO: how do we express this?
+    val result = pushedDownPlan transformUp  {
+      case j @Join(left: Filter, right: Filter, Inner, condition) => {
+        j.output.foreach { a => {
+          // propagate non-nullable up from the children.
+          if (nonNullableAttributes.isNonNullable(left, a) ||
+              nonNullableAttributes.isNonNullable(right, a)) {
+            nonNullableAttributes.add(j, a)
+          }
+        }}
+        // TODO: how do we make a new join with the input attributes are non-nullable
+        val nonNullable = nonNullableAttributes.nonNullable(j)
+        System.out.println("Here " + nonNullable)
+        j
+      }
+    }
+    result
+  }
 }
 
 /**

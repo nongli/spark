@@ -21,7 +21,7 @@ import org.apache.spark.sql.catalyst.analysis
 import org.apache.spark.sql.catalyst.analysis.EliminateSubQueries
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans.logical._
-import org.apache.spark.sql.catalyst.plans.{LeftSemi, PlanTest, LeftOuter, RightOuter}
+import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.rules._
 import org.apache.spark.sql.catalyst.dsl.plans._
 import org.apache.spark.sql.catalyst.dsl.expressions._
@@ -42,7 +42,8 @@ class FilterPushdownSuite extends PlanTest {
         PushPredicateThroughGenerate,
         PushPredicateThroughAggregate,
         ColumnPruning,
-        ProjectCollapsing) :: Nil
+        ProjectCollapsing,
+        PropagateNonNullability) :: Nil
   }
 
   val testRelation = LocalRelation('a.int, 'b.int, 'c.int)
@@ -695,6 +696,29 @@ class FilterPushdownSuite extends PlanTest {
                         .where('c === 2L)
                         .analyze
 
+    comparePlans(optimized, correctAnswer)
+  }
+
+
+  test("null push down") {
+    val x = testRelation.subquery('x)
+    val y = testRelation.subquery('y)
+
+    val originalQuery = {
+      x.join(y, Inner, Some("y.b".attr === "x.b".attr))
+    }
+
+    val optimized = Optimize.execute(originalQuery.analyze)
+    val left = testRelation.where(IsNotNull('b)).subquery('l)
+    val right = testRelation.where(IsNotNull('b)).subquery('r)
+    val correctAnswer = left.join(right, Inner, Some("l.b".attr === "r.b".attr)).analyze
+
+    println("Original")
+    println(originalQuery)
+    println("optimized")
+    println(optimized)
+    println("correct")
+    println(correctAnswer)
     comparePlans(optimized, correctAnswer)
   }
 }

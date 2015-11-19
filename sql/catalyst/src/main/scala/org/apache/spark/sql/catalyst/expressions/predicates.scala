@@ -25,6 +25,8 @@ import org.apache.spark.sql.catalyst.util.TypeUtils
 import org.apache.spark.sql.types._
 import org.apache.spark.util.Utils
 
+import scala.collection.mutable
+
 
 object InterpretedPredicate {
   def create(expression: Expression, inputSchema: Seq[Attribute]): (InternalRow => Boolean) =
@@ -63,6 +65,31 @@ trait PredicateHelper {
         splitDisjunctivePredicates(cond1) ++ splitDisjunctivePredicates(cond2)
       case other => other :: Nil
     }
+  }
+
+  /**
+    * Extracts the attributes in predicates (conjuncts) that are non-nullable. Attributes are
+    * implicitly non-nullable if <attribute> <binary comparison> <expression>
+    * TODO: confirm col = NULL is false.
+    */
+  protected def extractNonNullableAttributes(predicates: Seq[Expression]):
+      mutable.HashSet[Attribute] = {
+    val attributes = mutable.HashSet.empty[Attribute]
+
+    predicates.foreach { p => p match {
+      case BinaryComparison(lhs: Attribute, rhs: Attribute) => {
+        attributes.add(lhs)
+        attributes.add(rhs)
+      }
+        // TODO: attribute = NULL? does that work?
+      case BinaryComparison(lhs, rhs: Attribute) => {
+        attributes.add(rhs)
+      }
+      case BinaryComparison(lhs: Attribute, rhs) => {
+        attributes.add(lhs)
+      }
+    } }
+    attributes
   }
 
   /**
