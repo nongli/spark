@@ -31,7 +31,7 @@ import org.apache.spark.mapred.SparkHadoopMapRedUtil
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow
-import org.apache.spark.sql.catalyst.expressions.codegen.{UnsafeRowWriter, BufferHolder}
+import org.apache.spark.sql.catalyst.expressions.codegen.UnsafeRowWriter
 import org.apache.spark.sql.{AnalysisException, Row, SQLContext}
 import org.apache.spark.sql.execution.datasources.PartitionSpec
 import org.apache.spark.sql.sources._
@@ -99,16 +99,14 @@ private[sql] class TextRelation(
     sqlContext.sparkContext.hadoopRDD(
       conf.asInstanceOf[JobConf], classOf[TextInputFormat], classOf[LongWritable], classOf[Text])
       .mapPartitions { iter =>
-        val bufferHolder = new BufferHolder
-        val unsafeRowWriter = new UnsafeRowWriter
         val unsafeRow = new UnsafeRow
+        val unsafeRowWriter = new UnsafeRowWriter(unsafeRow, 1)
 
         iter.map { case (_, line) =>
           // Writes to an UnsafeRow directly
-          bufferHolder.reset()
-          unsafeRowWriter.initialize(bufferHolder, 1)
+          unsafeRowWriter.reset()
           unsafeRowWriter.write(0, line.getBytes, 0, line.getLength)
-          unsafeRow.pointTo(bufferHolder.buffer, 1, bufferHolder.totalSize())
+          unsafeRowWriter.finalizeRow()
           unsafeRow
         }
       }

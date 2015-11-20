@@ -63,7 +63,7 @@ object GenerateUnsafeProjection extends CodeGenerator[Seq[Expression], UnsafePro
       if ($input instanceof UnsafeRow) {
         ${writeUnsafeData(ctx, s"((UnsafeRow) $input)", bufferHolder)}
       } else {
-        ${writeExpressionsToBuffer(ctx, input, fieldEvals, fieldTypes, bufferHolder)}
+        ${writeExpressionsToBuffer(ctx, input, bufferHolder, fieldEvals, fieldTypes)}
       }
     """
   }
@@ -71,18 +71,16 @@ object GenerateUnsafeProjection extends CodeGenerator[Seq[Expression], UnsafePro
   private def writeExpressionsToBuffer(
       ctx: CodeGenContext,
       row: String,
+      rowWriter: String,
       inputs: Seq[GeneratedExpressionCode],
-      inputTypes: Seq[DataType],
-      bufferHolder: String): String = {
-    val rowWriter = ctx.freshName("rowWriter")
-    ctx.addMutableState(rowWriterClass, rowWriter, s"this.$rowWriter = new $rowWriterClass();")
-
+      inputTypes: Seq[DataType]): String = {
     val writeFields = inputs.zip(inputTypes).zipWithIndex.map {
       case ((input, dataType), index) =>
         val dt = dataType match {
           case udt: UserDefinedType[_] => udt.sqlType
           case other => other
         }
+        val bufferHolder = "a"
         val tmpCursor = ctx.freshName("tmpCursor")
 
         val setNull = dt match {
@@ -97,7 +95,7 @@ object GenerateUnsafeProjection extends CodeGenerator[Seq[Expression], UnsafePro
             s"""
               // Remember the current cursor so that we can calculate how many bytes are
               // written later.
-              final int $tmpCursor = $bufferHolder.cursor;
+              final int $tmpCursor = $rowWriter.cursor();
               ${writeStructToBuffer(ctx, input.value, t.map(_.dataType), bufferHolder)}
               $rowWriter.setOffsetAndSize($index, $tmpCursor, $bufferHolder.cursor - $tmpCursor);
             """
@@ -106,20 +104,20 @@ object GenerateUnsafeProjection extends CodeGenerator[Seq[Expression], UnsafePro
             s"""
               // Remember the current cursor so that we can calculate how many bytes are
               // written later.
-              final int $tmpCursor = $bufferHolder.cursor;
+              final int $tmpCursor = $rowWriter.cursor();
               ${writeArrayToBuffer(ctx, input.value, et, bufferHolder)}
               $rowWriter.setOffsetAndSize($index, $tmpCursor, $bufferHolder.cursor - $tmpCursor);
-              $rowWriter.alignToWords($bufferHolder.cursor - $tmpCursor);
+              $rowWriter.alignToWords($rowWriter.cursor - $tmpCursor);
             """
 
           case m @ MapType(kt, vt, _) =>
             s"""
               // Remember the current cursor so that we can calculate how many bytes are
               // written later.
-              final int $tmpCursor = $bufferHolder.cursor;
+              final int $tmpCursor = $rowWriter.cursor();
               ${writeMapToBuffer(ctx, input.value, kt, vt, bufferHolder)}
-              $rowWriter.setOffsetAndSize($index, $tmpCursor, $bufferHolder.cursor - $tmpCursor);
-              $rowWriter.alignToWords($bufferHolder.cursor - $tmpCursor);
+              $rowWriter.setOffsetAndSize($index, $tmpCursor, $bufferHolder.cursor() - $tmpCursor);
+              $rowWriter.alignToWords($rowWriter.cursor() - $tmpCursor);
             """
 
           case _ if ctx.isPrimitiveType(dt) =>
@@ -146,7 +144,6 @@ object GenerateUnsafeProjection extends CodeGenerator[Seq[Expression], UnsafePro
     }
 
     s"""
-      $rowWriter.initialize($bufferHolder, ${inputs.length});
       ${ctx.splitExpressions(row, writeFields)}
     """.trim
   }
@@ -283,20 +280,19 @@ object GenerateUnsafeProjection extends CodeGenerator[Seq[Expression], UnsafePro
 
     val result = ctx.freshName("result")
     ctx.addMutableState("UnsafeRow", result, s"this.$result = new UnsafeRow();")
-    val bufferHolder = ctx.freshName("bufferHolder")
-    val holderClass = classOf[BufferHolder].getName
-    ctx.addMutableState(holderClass, bufferHolder, s"this.$bufferHolder = new $holderClass();")
-
-    // Reset the subexpression values for each row.
+    val rowWriter = ctx.freshName("rowWriter")
+    ctx.addMutableState(rowWriterClass, rowWriter,
+      s"this.$rowWriter = new $rowWriterClass($result, ${expressions.length});")
+    // Reset the isLoaded flag for each row.
     val subexprReset = ctx.subExprResetVariables.mkString("\n")
 
     val code =
       s"""
-        $bufferHolder.reset();
+        $rowWriter.reset();
         $subexprReset
-        ${writeExpressionsToBuffer(ctx, ctx.INPUT_ROW, exprEvals, exprTypes, bufferHolder)}
+        ${writeExpressionsToBuffer(ctx, ctx.INPUT_ROW, rowWriter, exprEvals, exprTypes)}
 
-        $result.pointTo($bufferHolder.buffer, ${expressions.length}, $bufferHolder.totalSize());
+        $rowWriter.finalizeRow();
       """
     GeneratedExpressionCode(code, "false", result)
   }
