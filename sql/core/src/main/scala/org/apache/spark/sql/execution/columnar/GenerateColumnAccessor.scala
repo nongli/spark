@@ -119,7 +119,6 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
       import java.nio.ByteOrder;
       import scala.collection.Iterator;
       import org.apache.spark.sql.types.DataType;
-      import org.apache.spark.sql.catalyst.expressions.codegen.BufferHolder;
       import org.apache.spark.sql.catalyst.expressions.codegen.UnsafeRowWriter;
       import org.apache.spark.sql.execution.columnar.MutableUnsafeRow;
 
@@ -132,8 +131,7 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
         private ByteOrder nativeOrder = null;
         private byte[][] buffers = null;
         private UnsafeRow unsafeRow = new UnsafeRow();
-        private BufferHolder bufferHolder = new BufferHolder();
-        private UnsafeRowWriter rowWriter = new UnsafeRowWriter();
+        private UnsafeRowWriter rowWriter;
         private MutableUnsafeRow mutableRow = null;
 
         private int currentRow = 0;
@@ -148,15 +146,15 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
         public SpecificColumnarIterator() {
           this.nativeOrder = ByteOrder.nativeOrder();
           this.buffers = new byte[${columnTypes.length}][];
-          this.mutableRow = new MutableUnsafeRow(rowWriter);
-
-          ${initMutableStates(ctx)}
         }
 
         public void initialize(Iterator input, DataType[] columnTypes, int[] columnIndexes) {
           this.input = input;
           this.columnTypes = columnTypes;
           this.columnIndexes = columnIndexes;
+          this.rowWriter = new UnsafeRowWriter(unsafeRow, $numFields);
+          this.mutableRow = new MutableUnsafeRow(rowWriter);
+          ${initMutableStates(ctx)}
         }
 
         public boolean hasNext() {
@@ -180,10 +178,9 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
 
         public InternalRow next() {
           currentRow += 1;
-          bufferHolder.reset();
-          rowWriter.initialize(bufferHolder, $numFields);
+          rowWriter.reset();
           ${extractors.mkString("\n")}
-          unsafeRow.pointTo(bufferHolder.buffer, $numFields, bufferHolder.totalSize());
+          rowWriter.finalizeRow();
           return unsafeRow;
         }
       }"""

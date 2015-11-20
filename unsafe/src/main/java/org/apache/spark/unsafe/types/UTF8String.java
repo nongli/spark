@@ -134,6 +134,12 @@ public final class UTF8String implements Comparable<UTF8String>, Externalizable,
     this(null, 0, 0);
   }
 
+  public void setBytes(byte[] bytes, int offset, int numBytes) {
+    this.base = bytes;
+    this.offset = BYTE_ARRAY_OFFSET + offset;
+    this.numBytes = numBytes;
+  }
+
   /**
    * Writes the content of this string into a memory address, identified by an object and an offset.
    * The target memory address must already been allocated, and have enough space to hold all the
