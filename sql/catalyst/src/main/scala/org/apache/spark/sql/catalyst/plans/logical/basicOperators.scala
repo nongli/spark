@@ -25,8 +25,16 @@ import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.types._
 import scala.collection.mutable.ArrayBuffer
 
-case class Project(projectList: Seq[NamedExpression], child: LogicalPlan) extends UnaryNode {
-  override def output: Seq[Attribute] = projectList.map(_.toAttribute)
+object Project {
+  def apply(projectList: Seq[NamedExpression], child: LogicalPlan): Project = {
+    Project(projectList, child, projectList.map(_.toAttribute))
+  }
+}
+case class Project(
+    projectList: Seq[NamedExpression],
+    child: LogicalPlan,
+    output: Seq[Attribute])
+  extends UnaryNode {
 
   override lazy val resolved: Boolean = {
     val hasSpecialExpressions = projectList.exists ( _.collect {
@@ -63,6 +71,7 @@ case class Generate(
     child: LogicalPlan)
   extends UnaryNode {
 
+
   /** The set of all attributes produced by this node. */
   def generatedSet: AttributeSet = AttributeSet(generatorOutput)
 
@@ -87,8 +96,17 @@ case class Generate(
   }
 }
 
-case class Filter(condition: Expression, child: LogicalPlan) extends UnaryNode {
-  override def output: Seq[Attribute] = child.output
+object Filter {
+  def apply(condition: Expression, child: LogicalPlan): Filter = {
+    Filter(condition, child, child.output)
+  }
+}
+
+case class Filter(
+    condition: Expression,
+    child: LogicalPlan,
+    output: Seq[Attribute])
+  extends UnaryNode {
 }
 
 abstract class SetOperation(left: LogicalPlan, right: LogicalPlan) extends BinaryNode {
@@ -122,14 +140,13 @@ case class Except(left: LogicalPlan, right: LogicalPlan) extends SetOperation(le
   override def output: Seq[Attribute] = left.output
 }
 
-case class Join(
-  left: LogicalPlan,
-  right: LogicalPlan,
-  joinType: JoinType,
-  condition: Option[Expression]) extends BinaryNode {
-
-  override def output: Seq[Attribute] = {
-    joinType match {
+object Join {
+  def apply(
+    left: LogicalPlan,
+    right: LogicalPlan,
+    joinType: JoinType,
+    condition: Option[Expression]): Join = {
+    val output: Seq[Attribute] = joinType match {
       case LeftSemi =>
         left.output
       case LeftOuter =>
@@ -141,7 +158,16 @@ case class Join(
       case _ =>
         left.output ++ right.output
     }
+    Join(left, right, joinType, condition, output)
   }
+}
+
+case class Join(
+  left: LogicalPlan,
+  right: LogicalPlan,
+  joinType: JoinType,
+  condition: Option[Expression],
+  output: Seq[Attribute]) extends BinaryNode {
 
   def selfJoinResolved: Boolean = left.outputSet.intersect(right.outputSet).isEmpty
 

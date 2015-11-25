@@ -173,7 +173,7 @@ class Analyzer(
         if child.resolved && hasUnresolvedAlias(groupByExprs) =>
         Pivot(assignAliases(groupByExprs), pivotColumn, pivotValues, aggregates, child)
 
-      case Project(projectList, child) if child.resolved && hasUnresolvedAlias(projectList) =>
+      case Project(projectList, child, _) if child.resolved && hasUnresolvedAlias(projectList) =>
         Project(assignAliases(projectList), child)
     }
   }
@@ -336,7 +336,7 @@ class Analyzer(
       case p: LogicalPlan if !p.childrenResolved => p
 
       // If the projection list contains Stars, expand it.
-      case p @ Project(projectList, child) if containsStar(projectList) =>
+      case p @ Project(projectList, child, _) if containsStar(projectList) =>
         Project(
           projectList.flatMap {
             case s: Star => s.expand(child, resolver)
@@ -377,7 +377,7 @@ class Analyzer(
         a.copy(aggregateExpressions = expanded)
 
       // Special handling for cases when self-join introduce duplicate expression ids.
-      case j @ Join(left, right, _, _) if !j.selfJoinResolved =>
+      case j @ Join(left, right, _, _, _) if !j.selfJoinResolved =>
         val conflictingAttributes = left.outputSet.intersect(right.outputSet)
         logDebug(s"Conflicting attributes ${conflictingAttributes.mkString(",")} in $j")
 
@@ -389,7 +389,7 @@ class Analyzer(
             (oldVersion, newVersion)
 
           // Handle projects that create conflicting aliases.
-          case oldVersion @ Project(projectList, _)
+          case oldVersion @ Project(projectList, _, _)
               if findAliases(projectList).intersect(conflictingAttributes).nonEmpty =>
             (oldVersion, oldVersion.copy(projectList = newAliases(projectList)))
 
@@ -510,7 +510,7 @@ class Analyzer(
    */
   object ResolveSortReferences extends Rule[LogicalPlan] {
     def apply(plan: LogicalPlan): LogicalPlan = plan resolveOperators {
-      case s @ Sort(ordering, global, p @ Project(projectList, child))
+      case s @ Sort(ordering, global, p @ Project(projectList, child, _))
           if !s.resolved && p.resolved =>
         val (newOrdering, missing) = resolveAndFindMissing(ordering, p, child)
 
@@ -580,7 +580,7 @@ class Analyzer(
    */
   object GlobalAggregates extends Rule[LogicalPlan] {
     def apply(plan: LogicalPlan): LogicalPlan = plan resolveOperators {
-      case Project(projectList, child) if containsAggregates(projectList) =>
+      case Project(projectList, child, _) if containsAggregates(projectList) =>
         Aggregate(Nil, projectList, child)
     }
 
@@ -601,7 +601,7 @@ class Analyzer(
   object ResolveAggregateFunctions extends Rule[LogicalPlan] {
     def apply(plan: LogicalPlan): LogicalPlan = plan resolveOperators {
       case filter @ Filter(havingCondition,
-             aggregate @ Aggregate(grouping, originalAggExprs, child))
+             aggregate @ Aggregate(grouping, originalAggExprs, child), _)
           if aggregate.resolved =>
 
         // Try resolving the condition of the filter as though it is in the aggregate clause
@@ -702,7 +702,7 @@ class Analyzer(
       case g: Generate if !g.resolved =>
         g.copy(generatorOutput = makeGeneratorOutput(g.generator, g.generatorOutput.map(_.name)))
 
-      case p @ Project(projectList, child) =>
+      case p @ Project(projectList, child, _) =>
         // Holds the resolved generator, if one exists in the project list.
         var resolvedGenerator: Generate = null
 
@@ -974,7 +974,7 @@ class Analyzer(
 
       // Aggregate with Having clause. This rule works with an unresolved Aggregate because
       // a resolved Aggregate will not have Window Functions.
-      case f @ Filter(condition, a @ Aggregate(groupingExprs, aggregateExprs, child))
+      case f @ Filter(condition, a @ Aggregate(groupingExprs, aggregateExprs, child), _)
         if child.resolved &&
            hasWindowFunction(aggregateExprs) &&
            a.expressions.forall(_.resolved) =>
@@ -1007,7 +1007,7 @@ class Analyzer(
 
       // We only extract Window Expressions after all expressions of the Project
       // have been resolved.
-      case p @ Project(projectList, child)
+      case p @ Project(projectList, child, _)
         if hasWindowFunction(projectList) && !p.expressions.exists(!_.resolved) =>
         val (windowExpressions, regularExpressions) = extract(projectList)
         // We add a project to get all needed expressions for window expressions from the child
@@ -1124,7 +1124,7 @@ object CleanupAliases extends Rule[LogicalPlan] {
   }
 
   override def apply(plan: LogicalPlan): LogicalPlan = plan resolveOperators {
-    case Project(projectList, child) =>
+    case Project(projectList, child, _) =>
       val cleanedProjectList =
         projectList.map(trimNonTopLevelAliases(_).asInstanceOf[NamedExpression])
       Project(cleanedProjectList, child)

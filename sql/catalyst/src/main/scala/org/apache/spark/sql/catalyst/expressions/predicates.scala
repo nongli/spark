@@ -70,7 +70,8 @@ trait PredicateHelper {
   /**
     * Extracts the attributes in predicates (conjuncts) that are non-nullable. Attributes are
     * implicitly non-nullable if <attribute> <binary comparison> <expression>
-    * TODO: confirm col = NULL is false.
+    * TODO: this can be extend to many other predicate types. for example, abs(x) > 1 implies
+    * x is non-nullable.
     */
   protected def extractNonNullableAttributes(predicates: Seq[Expression]):
       mutable.HashSet[Attribute] = {
@@ -81,14 +82,16 @@ trait PredicateHelper {
         attributes.add(lhs)
         attributes.add(rhs)
       }
-        // TODO: attribute = NULL? does that work?
       case BinaryComparison(lhs, rhs: Attribute) => {
         attributes.add(rhs)
       }
       case BinaryComparison(lhs: Attribute, rhs) => {
         attributes.add(lhs)
       }
-    } }
+      case IsNotNull(a: Attribute) => {
+        attributes.add(a)
+      }
+    }}
     attributes
   }
 

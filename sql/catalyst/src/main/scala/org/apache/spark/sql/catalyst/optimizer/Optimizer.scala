@@ -80,7 +80,7 @@ object SamplePushDown extends Rule[LogicalPlan] {
 
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
     // Push down projection into sample
-    case Project(projectList, s @ Sample(lb, up, replace, seed, child)) =>
+    case Project(projectList, s @ Sample(lb, up, replace, seed, child), _) =>
       Sample(lb, up, replace, seed,
         Project(projectList, child))
   }
@@ -148,7 +148,7 @@ object SetOperationPushDown extends Rule[LogicalPlan] with PredicateHelper {
 
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
     // Push down filter into union
-    case Filter(condition, u @ Union(left, right)) =>
+    case Filter(condition, u @ Union(left, right), _) =>
       val (deterministic, nondeterministic) = partitionByDeterministic(condition)
       val rewrites = buildRewrites(u)
       Filter(nondeterministic,
@@ -159,7 +159,7 @@ object SetOperationPushDown extends Rule[LogicalPlan] with PredicateHelper {
       )
 
     // Push down deterministic projection through UNION ALL
-    case p @ Project(projectList, u @ Union(left, right)) =>
+    case p @ Project(projectList, u @ Union(left, right), _) =>
       if (projectList.forall(_.deterministic)) {
         val rewrites = buildRewrites(u)
         Union(
@@ -170,7 +170,7 @@ object SetOperationPushDown extends Rule[LogicalPlan] with PredicateHelper {
       }
 
     // Push down filter through INTERSECT
-    case Filter(condition, i @ Intersect(left, right)) =>
+    case Filter(condition, i @ Intersect(left, right), _) =>
       val (deterministic, nondeterministic) = partitionByDeterministic(condition)
       val rewrites = buildRewrites(i)
       Filter(nondeterministic,
@@ -181,7 +181,7 @@ object SetOperationPushDown extends Rule[LogicalPlan] with PredicateHelper {
       )
 
     // Push down filter through EXCEPT
-    case Filter(condition, e @ Except(left, right)) =>
+    case Filter(condition, e @ Except(left, right), _) =>
       val (deterministic, nondeterministic) = partitionByDeterministic(condition)
       val rewrites = buildRewrites(e)
       Filter(nondeterministic,
@@ -217,10 +217,10 @@ object ColumnPruning extends Rule[LogicalPlan] {
     case g: Generate if !g.join && (g.child.outputSet -- g.references).nonEmpty =>
       g.copy(child = Project(g.references.toSeq, g.child))
 
-    case p @ Project(_, g: Generate) if g.join && p.references.subsetOf(g.generatedSet) =>
+    case p @ Project(_, g: Generate, _) if g.join && p.references.subsetOf(g.generatedSet) =>
       p.copy(child = g.copy(join = false))
 
-    case p @ Project(projectList, g: Generate) if g.join =>
+    case p @ Project(projectList, g: Generate, _) if g.join =>
       val neededChildOutput = p.references -- g.generatorOutput ++ g.references
       if (neededChildOutput == g.child.outputSet) {
         p
@@ -228,8 +228,9 @@ object ColumnPruning extends Rule[LogicalPlan] {
         Project(projectList, g.copy(child = Project(neededChildOutput.toSeq, g.child)))
       }
 
-    case p @ Project(projectList, a @ Aggregate(groupingExpressions, aggregateExpressions, child))
-        if (a.outputSet -- p.references).nonEmpty =>
+    case p @ Project(
+        projectList, a @ Aggregate(groupingExpressions, aggregateExpressions, child), _)
+      if (a.outputSet -- p.references).nonEmpty =>
       Project(
         projectList,
         Aggregate(
@@ -238,7 +239,7 @@ object ColumnPruning extends Rule[LogicalPlan] {
           child))
 
     // Eliminate unneeded attributes from either side of a Join.
-    case Project(projectList, Join(left, right, joinType, condition)) =>
+    case Project(projectList, Join(left, right, joinType, condition, _), _) =>
       // Collect the list of all references required either above or to evaluate the condition.
       val allReferences: AttributeSet =
         AttributeSet(
@@ -251,7 +252,7 @@ object ColumnPruning extends Rule[LogicalPlan] {
       Project(projectList, Join(pruneJoinChild(left), pruneJoinChild(right), joinType, condition))
 
     // Eliminate unneeded attributes from right side of a LeftSemiJoin.
-    case Join(left, right, LeftSemi, condition) =>
+    case Join(left, right, LeftSemi, condition, _) =>
       // Collect the list of all references required to evaluate the condition.
       val allReferences: AttributeSet =
         condition.map(_.references).getOrElse(AttributeSet(Seq.empty))
@@ -259,11 +260,11 @@ object ColumnPruning extends Rule[LogicalPlan] {
       Join(left, prunedChild(right, allReferences), LeftSemi, condition)
 
     // Push down project through limit, so that we may have chance to push it further.
-    case Project(projectList, Limit(exp, child)) =>
+    case Project(projectList, Limit(exp, child), _) =>
       Limit(exp, Project(projectList, child))
 
     // Push down project if possible when the child is sort.
-    case p @ Project(projectList, s @ Sort(_, _, grandChild)) =>
+    case p @ Project(projectList, s @ Sort(_, _, grandChild), _) =>
       if (s.references.subsetOf(p.outputSet)) {
         s.copy(child = Project(projectList, grandChild))
       } else {
@@ -279,7 +280,7 @@ object ColumnPruning extends Rule[LogicalPlan] {
       }
 
     // Eliminate no-op Projects
-    case Project(projectList, child) if child.output == projectList => child
+    case Project(projectList, child, _) if child.output == projectList => child
   }
 
   /** Applies a projection only when the child is producing unnecessary attributes */
@@ -349,41 +350,130 @@ class NonNullabilityMap {
   *     are expensive. With codegen and non-nullablility, we can elide many of those checks.
   */
 object PropagateNonNullability extends Rule[LogicalPlan] with PredicateHelper {
+
+  case class Attr(a: Attribute) {
+    override def equals(o: Any): Boolean = o match {
+      case other: Attr => a.semanticEquals(other.a)
+      case _ => false
+    }
+    override val hashCode: Int = a.semanticHash()
+  }
+
+  /**
+    * Replaces each attribute in `attributes` with the non-nullable version if the attribute
+    * is contained in `nonNullable`. Otherwise, just returns the attribute.
+    */
+  def replaceWithNonNullable(
+      attributes: Seq[Attribute],
+      nonNullable: Set[Attr]): (Seq[Attribute], Boolean) = {
+    var substituted = false
+    val substitutedAttrs = attributes.map { a =>
+      if (nonNullable.contains(Attr(a))) {
+        substituted = true
+        a.withNullability(false)
+      } else {
+        a
+      }
+    }
+    (substitutedAttrs, substituted)
+  }
+  def replaceWithNonNullable(
+    attributes: Seq[Attribute],
+    nonNullable: Seq[Attribute]): (Seq[Attribute], Boolean) = {
+    replaceWithNonNullable(attributes, nonNullable.map(Attr(_)).toSet)
+  }
+
+  /**
+    * Aadd the non-nullable attributes to `nonNullable`
+    */
+  def addNonNullableAttributes(
+      attributes: Seq[Attribute],
+      nonNullable: mutable.HashSet[Attr]): Unit = {
+    attributes.filter(!_.nullable).foreach { a => nonNullable.add(Attr(a)) }
+  }
+
+  /**
+    * Returns the subset of `src` that is nullable but non-nullable in target.
+    */
+  def getNullableAttributes(src: Seq[Attribute], target: Seq[Attribute]): Seq[Attribute] = {
+    val targetSet = target.map(Attr(_))
+    src.filter{ a => a.nullable && targetSet.contains(Attr(a)) }
+  }
+
   def apply(plan: LogicalPlan): LogicalPlan = {
     System.out.println("Plan:")
     System.out.println(plan)
     // Foreach operator, we compute the set of attributes this operator returns that cannot be
-    // NULL. This does *not* mean that while evaluating the operator, the value is non-nullable.
+    // null. This does *not* mean that while evaluating the operator, the value is non-nullable
+    // (that only happens if the child's output is non-nullable).
+    // An attribute is non-nullable if:
+    //   - The attribute from the child is non-nullable OR
+    //   - The predicates evaluated at this node implies the attribute can only be non-null.
     // For example:
     // Agg
     //  Project
     //    Join (inner, t1.a = t2.b)
     //      Scan
     //    Scan
-    // After the first step, this map will t1.a and t2.b as both are implicitly non-nullable
-    // because of the join condition.
-    val nonNullableAttributes = new NonNullabilityMap()
-    plan.foreach { p => p match {
-      case Filter(condition, child) =>
+    // After the first step, it is implied that t1.a and t2.b are both non-nullable after the join.
+    // Agg (t1.a & t2.b non-nullable)
+    //  Project (t1.a & t2.b non-nullable)
+    //    Join (inner, t1.a = t2.b) (t1.a & t2.b non-nullable)
+    //      Scan
+    //    Scan
+    val nonNullablePlan = plan.transformUp {
+      case f @ Filter(condition, child, _) => {
+        // Get the attributes that will be non-nullable for the output of this filter. This
+        // includes attributes that are non-nullable from the child and the attributes that
+        // are implicitly non-nullable due to the filters.
         val attributes = extractNonNullableAttributes(splitConjunctivePredicates(condition))
-        attributes.foreach { a => nonNullableAttributes.add(p, a) }
+          .map { a => Attr(a) }
+        addNonNullableAttributes(child.output, attributes)
+        val substituted = replaceWithNonNullable(f.output, attributes.toSet)
+        if (substituted._2) {
+          Filter(condition, child, substituted._1)
+        } else {
+          f
+        }
+      }
 
       // TODO: handle other joins types (left and right outer)
-      case Join(left, right, Inner, Some(joinCondition)) => {
-        val joinKeys = ExtractEquiJoinKeys.unapply(p)
+      case j @ Join(left, right, Inner, Some(joinCondition), _) => {
+        val joinKeys = ExtractEquiJoinKeys.unapply(j)
         if (joinKeys.isDefined) {
+          val nonNullable = mutable.HashSet.empty[Attr]
           val leftKeys = joinKeys.get._2
           val rightKeys = joinKeys.get._3
           (leftKeys ++ rightKeys).foreach { e => e match {
-            case a: Attribute => nonNullableAttributes.add(p, a)
+            case a: Attribute => nonNullable.add(Attr(a))
           }}
+          addNonNullableAttributes(left.output, nonNullable)
+          addNonNullableAttributes(right.output, nonNullable)
+          val substituted = replaceWithNonNullable(j.output, nonNullable.toSet)
+
+          if (substituted._2) {
+            Join(left, right, Inner, Some(joinCondition), substituted._1)
+          } else {
+            j
+          }
+        } else {
+          j
         }
       }
-      case _ =>
-    }}
-    println("Step 1 attributes:\n" + nonNullableAttributes)
-    println
+      case p @ Project(list, child, o) => {
+        val nonNullable = mutable.HashSet.empty[Attr]
+        addNonNullableAttributes(child.output, nonNullable)
+        val substituted = replaceWithNonNullable(p.output, nonNullable.toSet)
+        if (substituted._2) {
+          Project(list, child, substituted._1)
+        } else {
+          p
+        }
+      }
+    }
 
+    println("nonnullable")
+    println(nonNullablePlan)
 
     // Next, we will push the non-nullability *down*. The rationale is that if this operator
     // isn't going to return NULLs anyway, there is no point to have it consume NULLs. This is
@@ -396,68 +486,53 @@ object PropagateNonNullability extends Rule[LogicalPlan] with PredicateHelper {
     //      Scan
     //    Filter (t1.a is not null, non-nullable)
     //    Scan
-    val pushedDownPlan = plan transform {
+    val pushedDownPlan = nonNullablePlan transform {
       // TODO: other nodes.
-      case j @ Join(left: LeafNode, right: LeafNode, Inner, condition) => {
-        val lNonNullable: Seq[Attribute] =
-          left.output.filter { a => nonNullableAttributes.isNonNullable(j, a)}
-        val rNonNullable: Seq[Attribute] =
-          right.output.filter { a => nonNullableAttributes.isNonNullable(j, a)}
+      case j @ Join(left: LeafNode, right: LeafNode, Inner, condition, o) => {
+        val joinNonNullable = j.output.filter(!_.nullable)
+        val leftNullable: Seq[Attribute] = getNullableAttributes(left.output, joinNonNullable)
+        val rightNullable: Seq[Attribute] = getNullableAttributes(right.output, joinNonNullable)
+
+        println(leftNullable)
 
         var leftFilter: Filter = null
         var rightFilter: Filter = null
+        var newConditions: Expression = null
         // Add IS NOT NULL filters and mark the attributes are non-nullable
-        if (!lNonNullable.isEmpty) {
-          leftFilter = Filter(lNonNullable.map(IsNotNull(_)).reduce(And), left)
-          lNonNullable.foreach { a => nonNullableAttributes.add(leftFilter, a)}
+        if (!leftNullable.isEmpty) {
+          val substituted = replaceWithNonNullable(left.output, leftNullable)
+          leftFilter = Filter(leftNullable.map(IsNotNull(_)).reduce(And), left, substituted._1)
         }
-        if (!rNonNullable.isEmpty) {
-          rightFilter = Filter(rNonNullable.map(IsNotNull(_)).reduce(And), right)
-          rNonNullable.foreach { a => nonNullableAttributes.add(rightFilter, a)}
+        if (!rightNullable.isEmpty) {
+          val substituted = replaceWithNonNullable(right.output, rightNullable)
+          rightFilter = Filter(rightNullable.map(IsNotNull(_)).reduce(And), right, substituted._1)
         }
-
-        if (leftFilter == null && rightFilter == null) {
-          j
-        } else {
-          Join(leftFilter, rightFilter, Inner, condition)
-        }
-      }
-    }
-
-    println("Step 2 attributes:\n" + nonNullableAttributes)
-    println
-
-    // In the final step, we will bubble the non-nullability *up* the tree. If the operator below
-    // you produced non-null attributes, the operator can elide NULL checking will *consuming* the
-    // attribute. For codegen, in particular, skipping these checks is very beneficial.
-    // This step replaces operator in the tree with the non-null version of the attributes as
-    // needed.
-    // Using the running example, this results in:
-    // After this step:
-    // Agg (t1.a, t2.b non-nullable)
-    //  Project (t1.a, t2.b non-nullabe)
-    //    Join (inner, t1.a = t2.b, non-nullable)
-    //      Filter (t2.a is not null, non-nullable)
-    //      Scan
-    //    Filter (t1.a is not null, non-nullable)
-    //    Scan
-    // TODO: how do we express this?
-    val result = pushedDownPlan transformUp  {
-      case j @Join(left: Filter, right: Filter, Inner, condition) => {
-        j.output.foreach { a => {
-          // propagate non-nullable up from the children.
-          if (nonNullableAttributes.isNonNullable(left, a) ||
-              nonNullableAttributes.isNonNullable(right, a)) {
-            nonNullableAttributes.add(j, a)
+        if (condition.isDefined) {
+          val childNonNullable = (leftNullable ++ rightNullable).map(Attr(_)).toSet
+          newConditions = condition.get transform {
+            case a: Attribute => {
+              if (childNonNullable.contains(Attr(a))) {
+                a.withNullability(false)
+              } else {
+                a
+              }
+            }
           }
-        }}
-        // TODO: how do we make a new join with the input attributes are non-nullable
-        val nonNullable = nonNullableAttributes.nonNullable(j)
-        System.out.println("Here " + nonNullable)
-        j
+        }
+
+        if (leftFilter == null && rightFilter == null && newConditions == null) {
+          j
+        } else if (newConditions == null) {
+          Join(leftFilter, rightFilter, Inner, condition, o)
+        } else {
+          Join(leftFilter, rightFilter, Inner, Some(newConditions), o)
+        }
       }
     }
-    result
+    println("pushed down")
+    println(pushedDownPlan)
+
+    pushedDownPlan
   }
 }
 
@@ -468,7 +543,7 @@ object PropagateNonNullability extends Rule[LogicalPlan] with PredicateHelper {
 object ProjectCollapsing extends Rule[LogicalPlan] {
 
   def apply(plan: LogicalPlan): LogicalPlan = plan transformUp {
-    case p @ Project(projectList1, Project(projectList2, child)) =>
+    case p @ Project(projectList1, Project(projectList2, child, _), _) =>
       // Create a map of Aliases to their values from the child projection.
       // e.g., 'SELECT ... FROM (SELECT a + b AS c, d ...)' produces Map(c -> Alias(a + b, c)).
       val aliasMap = AttributeMap(projectList2.collect {
@@ -762,7 +837,7 @@ object BooleanSimplification extends Rule[LogicalPlan] with PredicateHelper {
  */
 object CombineFilters extends Rule[LogicalPlan] {
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case ff @ Filter(fc, nf @ Filter(nc, grandChild)) => Filter(And(nc, fc), grandChild)
+    case ff @ Filter(fc, nf @ Filter(nc, grandChild, _), _) => Filter(And(nc, fc), grandChild)
   }
 }
 
@@ -774,11 +849,11 @@ object CombineFilters extends Rule[LogicalPlan] {
 object SimplifyFilters extends Rule[LogicalPlan] {
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
     // If the filter condition always evaluate to true, remove the filter.
-    case Filter(Literal(true, BooleanType), child) => child
+    case Filter(Literal(true, BooleanType), child, _) => child
     // If the filter condition always evaluate to null or false,
     // replace the input with an empty relation.
-    case Filter(Literal(null, _), child) => LocalRelation(child.output, data = Seq.empty)
-    case Filter(Literal(false, BooleanType), child) => LocalRelation(child.output, data = Seq.empty)
+    case Filter(Literal(null, _), child, _) => LocalRelation(child.output, data = Seq.empty)
+    case Filter(Literal(false, BooleanType), child, _) => LocalRelation(child.output, data = Seq.empty)
   }
 }
 
@@ -790,7 +865,7 @@ object SimplifyFilters extends Rule[LogicalPlan] {
  */
 object PushPredicateThroughProject extends Rule[LogicalPlan] with PredicateHelper {
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case filter @ Filter(condition, project @ Project(fields, grandChild)) =>
+    case filter @ Filter(condition, project @ Project(fields, grandChild, _), _) =>
       // Create a map of Aliases to their values from the child projection.
       // e.g., 'SELECT a + b AS c, d ...' produces Map(c -> a + b).
       val aliasMap = AttributeMap(fields.collect {
@@ -837,7 +912,7 @@ object PushPredicateThroughProject extends Rule[LogicalPlan] with PredicateHelpe
 object PushPredicateThroughGenerate extends Rule[LogicalPlan] with PredicateHelper {
 
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case filter @ Filter(condition, g: Generate) =>
+    case filter @ Filter(condition, g: Generate, _) =>
       // Predicates that reference attributes produced by the `Generate` operator cannot
       // be pushed below the operator.
       val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition {
@@ -863,7 +938,7 @@ object PushPredicateThroughAggregate extends Rule[LogicalPlan] with PredicateHel
 
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
     case filter @ Filter(condition,
-        aggregate @ Aggregate(groupingExpressions, aggregateExpressions, grandChild)) =>
+        aggregate @ Aggregate(groupingExpressions, aggregateExpressions, grandChild), _) =>
       val (pushDown, stayUp) = splitConjunctivePredicates(condition).partition {
         conjunct => conjunct.references subsetOf AttributeSet(groupingExpressions)
       }
@@ -904,7 +979,7 @@ object PushPredicateThroughJoin extends Rule[LogicalPlan] with PredicateHelper {
 
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
     // push the where condition down into join filter
-    case f @ Filter(filterCondition, Join(left, right, joinType, joinCondition)) =>
+    case f @ Filter(filterCondition, Join(left, right, joinType, joinCondition, _), _) =>
       val (leftFilterConditions, rightFilterConditions, commonFilterCondition) =
         split(splitConjunctivePredicates(filterCondition), left, right)
 
@@ -942,7 +1017,7 @@ object PushPredicateThroughJoin extends Rule[LogicalPlan] with PredicateHelper {
       }
 
     // push down the join filter into sub query scanning if applicable
-    case f @ Join(left, right, joinType, joinCondition) =>
+    case f @ Join(left, right, joinType, joinCondition, _) =>
       val (leftJoinConditions, rightJoinConditions, commonJoinCondition) =
         split(joinCondition.map(splitConjunctivePredicates).getOrElse(Nil), left, right)
 
@@ -1056,7 +1131,7 @@ object DecimalAggregates extends Rule[LogicalPlan] {
  */
 object ConvertToLocalRelation extends Rule[LogicalPlan] {
   def apply(plan: LogicalPlan): LogicalPlan = plan transform {
-    case Project(projectList, LocalRelation(output, data)) =>
+    case Project(projectList, LocalRelation(output, data), _) =>
       val projection = new InterpretedProjection(projectList, output)
       LocalRelation(projectList.map(_.toAttribute), data.map(projection))
   }
