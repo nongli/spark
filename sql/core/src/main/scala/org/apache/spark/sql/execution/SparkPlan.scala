@@ -23,6 +23,7 @@ import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.Logging
 import org.apache.spark.rdd.{RDD, RDDOperationScope}
+import org.apache.spark.sql.catalyst.trees.CurrentOrigin
 import org.apache.spark.sql.{Row, SQLContext}
 import org.apache.spark.sql.catalyst.{CatalystTypeConverters, InternalRow}
 import org.apache.spark.sql.catalyst.expressions._
@@ -31,6 +32,16 @@ import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution.metric.{LongSQLMetric, SQLMetric}
 import org.apache.spark.sql.types.DataType
+
+
+class IdGen {
+  private var id: Int = 1
+  def getNext(): Int = {
+    val result = id
+    id += 1
+    result
+  }
+}
 
 /**
  * The base class for physical operators.
@@ -65,6 +76,15 @@ abstract class SparkPlan extends QueryPlan[SparkPlan] with Logging with Serializ
   override def makeCopy(newArgs: Array[AnyRef]): SparkPlan = {
     SQLContext.setActive(sqlContext)
     super.makeCopy(newArgs)
+  }
+
+  private[sql] def setIds(idGen: IdGen): Unit = {
+    children.foreach { _.setIds(idGen) }
+    id = idGen.getNext()
+  }
+
+  private[sql] def setIds(): Unit = {
+    setIds(new IdGen())
   }
 
   /**
@@ -126,6 +146,21 @@ abstract class SparkPlan extends QueryPlan[SparkPlan] with Logging with Serializ
       prepare()
       doExecute()
     }
+  }
+
+  def transformUpPreserveId(rule: PartialFunction[SparkPlan, SparkPlan]): SparkPlan = {
+    val afterRuleOnChildren = transformChildren(rule, (t, r) => t.transformUpPreserveId(r))
+    val n = if (this fastEquals afterRuleOnChildren) {
+      CurrentOrigin.withOrigin(origin) {
+        rule.applyOrElse(this, identity[SparkPlan])
+      }
+    } else {
+      CurrentOrigin.withOrigin(origin) {
+        rule.applyOrElse(afterRuleOnChildren, identity[SparkPlan])
+      }
+    }
+    n.id = this.id
+    n
   }
 
   /**

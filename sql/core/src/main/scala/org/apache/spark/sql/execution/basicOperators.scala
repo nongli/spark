@@ -22,13 +22,38 @@ import org.apache.spark.shuffle.sort.SortShuffleManager
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.catalyst.expressions.codegen.GenerateUnsafeRowJoiner
+import org.apache.spark.sql.catalyst.expressions.codegen.{GenerateProfilingProjection, GenerateUnsafeRowJoiner}
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.util.MutablePair
 import org.apache.spark.util.random.PoissonSampler
 import org.apache.spark.{HashPartitioner, SparkEnv}
 
+case class ProfilingProject(child: SparkPlan, name: String, i: Int = 0) extends UnaryNode {
+  override def outputsUnsafeRows: Boolean = true
+  override def canProcessUnsafeRows: Boolean = true
+  override def canProcessSafeRows: Boolean = true
+
+  /**
+   * Overridden by concrete implementations of SparkPlan.
+   * Produces the result of the query as an RDD[InternalRow]
+   */
+  override protected def doExecute(): RDD[InternalRow] = {
+    child.execute().mapPartitionsInternal { iter =>
+      assert(i != 0, this.toString)
+      val v = new GenerateProfilingProjection(name + "_" + i)
+      val projection = v.generate()
+      iter.map(projection.apply(_))
+    }
+  }
+
+  override def output: Seq[Attribute] = child.output
+  override def outputOrdering: Seq[SortOrder] = child.outputOrdering
+
+  override def simpleString: String = {
+    s"Profile(name=$id:$name)"
+  }
+}
 
 case class Project(projectList: Seq[NamedExpression], child: SparkPlan) extends UnaryNode {
 
@@ -56,7 +81,6 @@ case class Project(projectList: Seq[NamedExpression], child: SparkPlan) extends 
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
 }
 
-
 case class Filter(condition: Expression, child: SparkPlan) extends UnaryNode {
   override def output: Seq[Attribute] = child.output
 
@@ -67,6 +91,7 @@ case class Filter(condition: Expression, child: SparkPlan) extends UnaryNode {
   protected override def doExecute(): RDD[InternalRow] = {
     val numInputRows = longMetric("numInputRows")
     val numOutputRows = longMetric("numOutputRows")
+
     child.execute().mapPartitionsInternal { iter =>
       val predicate = newPredicate(condition, child.output)
       iter.filter { row =>

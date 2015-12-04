@@ -2028,4 +2028,9 @@ class SQLQuerySuite extends QueryTest with SharedSQLContext {
       Row(false) :: Row(true) :: Nil)
   }
 
+  test("Profile") {
+    val df = sql("select count(*) from testData2 t1 join testData2 t2 on t1.a = t2.a where t1.a = 1")
+    df.show()
+    println(df.queryExecution.executedPlan)
+  }
 }

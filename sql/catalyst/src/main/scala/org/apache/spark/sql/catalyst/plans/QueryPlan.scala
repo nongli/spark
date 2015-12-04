@@ -152,6 +152,8 @@ abstract class QueryPlan[PlanType <: TreeNode[PlanType]] extends TreeNode[PlanTy
     }.toSeq
   }
 
+  var id: Int = 0
+
   lazy val schema: StructType = StructType.fromAttributes(output)
 
   /** Returns the output schema in the tree format. */
@@ -167,7 +169,11 @@ abstract class QueryPlan[PlanType <: TreeNode[PlanType]] extends TreeNode[PlanTy
    *
    * We use "!" to indicate an invalid plan, and "'" to indicate an unresolved plan.
    */
-  protected def statePrefix = if (missingInput.nonEmpty && children.nonEmpty) "!" else ""
+  protected def statePrefix = if (missingInput.nonEmpty && children.nonEmpty) {
+    "!" + "(" + id + ") "
+  } else {
+    "(" + id + ") "
+  }
 
   override def simpleString: String = statePrefix + super.simpleString
 }

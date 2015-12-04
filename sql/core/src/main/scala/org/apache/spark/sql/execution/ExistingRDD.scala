@@ -103,7 +103,8 @@ private[sql] case class PhysicalRDD(
 
   protected override def doExecute(): RDD[InternalRow] = rdd
 
-  override def simpleString: String = "Scan " + extraInformation + output.mkString("[", ",", "]")
+  override def simpleString: String = super.statePrefix +
+    "Scan " + extraInformation + output.mkString("[", ",", "]")
 }
 
 private[sql] object PhysicalRDD {

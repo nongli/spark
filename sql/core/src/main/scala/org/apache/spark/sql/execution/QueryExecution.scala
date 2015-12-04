@@ -20,7 +20,9 @@ package org.apache.spark.sql.execution
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan}
+import org.apache.spark.sql.execution.aggregate.TungstenAggregate
+import org.apache.spark.sql.execution.joins.{BroadcastNestedLoopJoin, CartesianProduct, BroadcastHashJoin, SortMergeJoin}
 
 /**
  * The primary workflow for executing relational queries using Spark.  Designed to allow easy
@@ -47,9 +49,51 @@ class QueryExecution(val sqlContext: SQLContext, val logical: LogicalPlan) {
     sqlContext.planner.plan(optimizedPlan).next()
   }
 
+
   // executedPlan should not be used to initialize any SparkPlan. It should be
   // only used for execution.
-  lazy val executedPlan: SparkPlan = sqlContext.prepareForExecution.execute(sparkPlan)
+  lazy val distributedPlan: SparkPlan = sqlContext.prepareForExecution.execute(sparkPlan)
+  distributedPlan.setIds()
+  println(distributedPlan)
+
+  lazy val executedPlan = distributedPlan transformUpPreserveId  {
+    case f @ Filter(_, _) => {
+      ProfilingProject(f, "Filter")
+    }
+    case s @ PhysicalRDD(_, _, _ , _) => {
+      ProfilingProject(s, "Scan")
+    }
+    case a @ TungstenAggregate(_, _, _, _, _, _, _, _, _) => {
+      ProfilingProject(a, "Aggregate")
+    }
+    case e @ Exchange(_, _, _) => {
+      ProfilingProject(e, "Exchange")
+    }
+    case l @ Limit(_, _) => {
+      ProfilingProject(l, "Limit")
+    }
+    case s @ Sort(_, _, _, _) => {
+      ProfilingProject(s, "Sort")
+    }
+    case j @ SortMergeJoin(_, _, _, _) => {
+      ProfilingProject(j, "SortMergeJoin")
+    }
+    case j @ BroadcastHashJoin(_, _, _, _, _) => {
+      ProfilingProject(j, "BroadcastHashJoin")
+    }
+    case j @ CartesianProduct(_, _) => {
+      ProfilingProject(j, "CartesianProduct")
+    }
+    case j @ BroadcastNestedLoopJoin(_, _, _, _, _) => {
+      ProfilingProject(j, "BroadcastNestedLoopJoin")
+    }
+  } transform {
+    case p @ ProfilingProject(c, n, _) => {
+     ProfilingProject(c, n, p.id)
+    }
+  }
+
+  //lazy val executedPlan = distributedPlan
 
   /** Internal version of the RDD. Avoids copies and has no schema */
   lazy val toRdd: RDD[InternalRow] = executedPlan.execute()

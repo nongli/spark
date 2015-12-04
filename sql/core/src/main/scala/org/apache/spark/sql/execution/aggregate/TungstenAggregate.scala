@@ -121,7 +121,7 @@ case class TungstenAggregate(
   override def simpleString: String = {
     val allAggregateExpressions = nonCompleteAggregateExpressions ++ completeAggregateExpressions
 
-    testFallbackStartsAt match {
+    val s = testFallbackStartsAt match {
       case None =>
         val keyString = groupingExpressions.mkString("[", ",", "]")
         val functionString = allAggregateExpressions.mkString("[", ",", "]")
@@ -131,6 +131,7 @@ case class TungstenAggregate(
         s"TungstenAggregateWithControlledFallback $groupingExpressions " +
           s"$allAggregateExpressions $resultExpressions fallbackStartsAt=$fallbackStartsAt"
     }
+    statePrefix + s
   }
 }
 
