@@ -27,6 +27,8 @@ import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.sql.types.{IntegerType, StructField, StructType}
 import org.apache.spark.util.collection.CompactBuffer
 
+import scala.collection.mutable
+
 
 class HashedRelationSuite extends SparkFunSuite with SharedSQLContext {
 
@@ -35,10 +37,22 @@ class HashedRelationSuite extends SparkFunSuite with SharedSQLContext {
     override def apply(row: InternalRow): InternalRow = row
   }
 
+  private val unsafeKeyProjection = new UnsafeProjection {
+    override def apply(row: InternalRow): UnsafeRow = row.asInstanceOf[UnsafeRow]
+  }
+
+  def createUnsafeRow(i: Long): UnsafeRow = {
+    val data = new Array[Byte](16)
+    val row = new UnsafeRow
+    row.pointTo(data, 1, 16)
+    row.setLong(0, i)
+    row
+  }
+
   test("GeneralHashedRelation") {
     val data = Array(InternalRow(0), InternalRow(1), InternalRow(2), InternalRow(2))
     val numDataRows = SQLMetrics.createLongMetric(sparkContext, "data")
-    val hashed = HashedRelation(data.iterator, numDataRows, keyProjection)
+    val hashed = HashedRelation(data.iterator, numDataRows, keyProjection, data.size)
     assert(hashed.isInstanceOf[GeneralHashedRelation])
 
     assert(hashed.get(data(0)) === CompactBuffer[InternalRow](data(0)))
@@ -54,7 +68,7 @@ class HashedRelationSuite extends SparkFunSuite with SharedSQLContext {
   test("UniqueKeyHashedRelation") {
     val data = Array(InternalRow(0), InternalRow(1), InternalRow(2))
     val numDataRows = SQLMetrics.createLongMetric(sparkContext, "data")
-    val hashed = HashedRelation(data.iterator, numDataRows, keyProjection)
+    val hashed = HashedRelation(data.iterator, numDataRows, keyProjection, data.size)
     assert(hashed.isInstanceOf[UniqueKeyHashedRelation])
 
     assert(hashed.get(data(0)) === CompactBuffer[InternalRow](data(0)))
@@ -68,6 +82,33 @@ class HashedRelationSuite extends SparkFunSuite with SharedSQLContext {
     assert(uniqHashed.getValue(data(2)) === data(2))
     assert(uniqHashed.getValue(InternalRow(10)) === null)
     assert(numDataRows.value.value === data.length)
+  }
+
+  test("FixedSizeHashRelation") {
+    val data = Array(createUnsafeRow(0), createUnsafeRow(1), createUnsafeRow(2))
+    val hashed = new FixedSizeHashRelation(data.toIterator, unsafeKeyProjection, data.size)
+    assert(hashed.get(data(0)).size === 1)
+    assert(hashed.get(data(0)).head === data(0))
+    assert(hashed.get(data(1)).size === 1)
+    assert(hashed.get(data(1)).head === data(1))
+    assert(hashed.get(data(2)).size === 1)
+    assert(hashed.get(data(2)).head === data(2))
+    assert(hashed.get(InternalRow(10)) === null)
+
+    val os = new ByteArrayOutputStream()
+    val out = new ObjectOutputStream(os)
+    hashed.writeExternal(out)
+    out.flush()
+    val in = new ObjectInputStream(new ByteArrayInputStream(os.toByteArray))
+    val hashed2 = new FixedSizeHashRelation()
+    hashed2.readExternal(in)
+    assert(hashed2.get(data(0)).size === 1)
+    assert(hashed2.get(data(0)).head === data(0))
+    assert(hashed2.get(data(1)).size === 1)
+    assert(hashed2.get(data(1)).head === data(1))
+    assert(hashed2.get(data(2)).size === 1)
+    assert(hashed2.get(data(2)).head === data(2))
+    assert(hashed2.get(InternalRow(10)) === null)
   }
 
   test("UnsafeHashedRelation") {
@@ -133,5 +174,69 @@ class HashedRelationSuite extends SparkFunSuite with SharedSQLContext {
     hashed2.writeExternal(out2)
     out2.flush()
     assert(java.util.Arrays.equals(os2.toByteArray, os.toByteArray))
+  }
+
+  def testHashedRelation(ht: HashedRelation, data: Array[InternalRow], iters: Int): (Long, Long) = {
+    val start = System.currentTimeMillis()
+    var matches = 0L
+    for (i <- 1 to iters) {
+      data.foreach { r =>
+        val find = ht.get(r)
+        if (find != null) matches += find.size
+      }
+    }
+    (matches, System.currentTimeMillis() - start)
+  }
+
+  /*
+BroadcastHashedRelation: 2571 30000000
+  Rate:  11.67 M/sec
+UnsafeRow Hash Table: 3461 30000000
+  Rate:   8.67 M/sec
+UnsafeRow BytesToBytesMap: 3878 30000000
+  Rate:   7.74 M/sec
+   */
+  test("Measure hashed relation perf") {
+    val N = 10000L
+    val iters = 6000
+    val buildData = mutable.ArrayBuffer.empty[UnsafeRow]
+    val probeData = mutable.ArrayBuffer.empty[UnsafeRow]
+    (1L to N).foreach { i => buildData += createUnsafeRow(i * 2) }
+    (1L to 2 * N).foreach { i => probeData += createUnsafeRow(i) }
+
+    val numDataRows = SQLMetrics.createLongMetric(sparkContext, "data")
+
+    // Fixed size hash table for all internal rows.
+    val broadcastHashedRelation = new FixedSizeHashRelation(
+        buildData.toIterator, unsafeKeyProjection, buildData.size)
+
+    // Unsafe row but running in local mode.
+    val unsafeHashed = HashedRelation(
+        buildData.iterator, numDataRows, unsafeKeyProjection, buildData.size)
+
+    // Unsafe row using bytes to bytes map (similar to broadcast join).
+    val os = new ByteArrayOutputStream()
+    val out = new ObjectOutputStream(os)
+    unsafeHashed.asInstanceOf[UnsafeHashedRelation].writeExternal(out)
+    out.flush()
+    val in = new ObjectInputStream(new ByteArrayInputStream(os.toByteArray))
+    val unsafeBytesToBytes = new UnsafeHashedRelation()
+    unsafeBytesToBytes.readExternal(in)
+
+    // scalastyle:off
+    testHashedRelation(broadcastHashedRelation, probeData.toArray, 1)
+    val (matches1, time1) = testHashedRelation(broadcastHashedRelation, probeData.toArray, iters)
+    println("BroadcastHashedRelation: " + time1 + " " + matches1)
+    println("  Rate: " + ("%6.2f").format(matches1 * 2 / 1000. / time1) + " M/sec")
+
+    testHashedRelation(unsafeHashed, probeData.toArray, 1)
+    val (matches2, time2) = testHashedRelation(unsafeHashed, probeData.toArray, iters)
+    println("UnsafeRow Hash Table: " + time2 + " " + matches2)
+    println("  Rate: " + ("%6.2f").format(matches2 * 2 / 1000. / time2) + " M/sec")
+
+    testHashedRelation(unsafeBytesToBytes, probeData.toArray, 1)
+    val (matches3, time3) = testHashedRelation(unsafeBytesToBytes, probeData.toArray, iters)
+    println("UnsafeRow BytesToBytesMap: " + time3 + " " + matches3)
+    println("  Rate: " + ("%6.2f").format(matches3 * 2 / 1000. / time3) + " M/sec")
   }
 }

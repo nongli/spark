@@ -55,7 +55,7 @@ case class LeftSemiJoinHash(
         val hashSet = buildKeyHashSet(buildIter, numRightRows)
         hashSemiJoin(streamIter, numLeftRows, hashSet, numOutputRows)
       } else {
-        val hashRelation = HashedRelation(buildIter, numRightRows, rightKeyGenerator)
+        val hashRelation = HashedRelation(buildIter, numRightRows, rightKeyGenerator, -1)
         hashSemiJoin(streamIter, numLeftRows, hashRelation, numOutputRows)
       }
     }

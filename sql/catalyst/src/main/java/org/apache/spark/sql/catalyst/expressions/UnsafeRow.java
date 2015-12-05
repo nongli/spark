@@ -194,6 +194,12 @@ public final class UnsafeRow extends MutableRow implements Externalizable, KryoS
     this.sizeInBytes = sizeInBytes;
   }
 
+  public void pointTo(Object baseObject, long baseOffset, int sizeInBytes) {
+    this.baseObject = baseObject;
+    this.baseOffset = baseOffset;
+    this.sizeInBytes = sizeInBytes;
+  }
+
   /**
    * Update this UnsafeRow to point to the underlying byte array.
    *

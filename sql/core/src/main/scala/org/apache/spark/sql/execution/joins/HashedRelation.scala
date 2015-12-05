@@ -34,7 +34,6 @@ import org.apache.spark.util.{SizeEstimator, KnownSizeEstimation, Utils}
 import org.apache.spark.util.collection.CompactBuffer
 import org.apache.spark.{SparkConf, SparkEnv}
 
-
 /**
  * Interface for a hashed relation by some key. Use [[HashedRelation.apply]] to create a concrete
  * object.
@@ -115,22 +114,28 @@ final class UniqueKeyHashedRelation(private var hashTable: JavaHashMap[InternalR
 private[execution] object HashedRelation {
 
   def apply(localNode: LocalNode, keyGenerator: Projection): HashedRelation = {
-    apply(localNode.asIterator, SQLMetrics.nullLongMetric, keyGenerator)
+    apply(localNode.asIterator, SQLMetrics.nullLongMetric, keyGenerator, -1)
   }
 
   def apply(
       input: Iterator[InternalRow],
       numInputRows: LongSQLMetric,
       keyGenerator: Projection,
-      sizeEstimate: Int = 64): HashedRelation = {
+      sizeEstimate: Int): HashedRelation = {
+
+    if (sizeEstimate != -1 && sizeEstimate < 32 * 1024) {
+    //  return new FixedSizeHashRelation(input, keyGenerator, sizeEstimate)
+    }
 
     if (keyGenerator.isInstanceOf[UnsafeProjection]) {
       return UnsafeHashedRelation(
-        input, numInputRows, keyGenerator.asInstanceOf[UnsafeProjection], sizeEstimate)
+        input, numInputRows, keyGenerator.asInstanceOf[UnsafeProjection],
+        if (sizeEstimate > 0) sizeEstimate else 64)
     }
 
     // TODO: Use Spark's HashMap implementation.
-    val hashTable = new JavaHashMap[InternalRow, CompactBuffer[InternalRow]](sizeEstimate)
+    val hashTable = new JavaHashMap[InternalRow, CompactBuffer[InternalRow]](
+      if (sizeEstimate > 0) sizeEstimate else 64)
     var currentRow: InternalRow = null
 
     // Whether the join key is unique. If the key is unique, we can convert the underlying
@@ -167,6 +172,50 @@ private[execution] object HashedRelation {
     } else {
       new GeneralHashedRelation(hashTable)
     }
+  }
+}
+
+/**
+  * A HashedRelation when the hash table size is known in advanced, for example in the case of
+  * broadcast joins.
+  */
+private[joins] final class FixedSizeHashRelation(
+    private var input: Iterator[UnsafeRow], keyGenerator: UnsafeProjection, size: Int)
+  extends HashedRelation
+  with Externalizable {
+
+  private[joins] def this() = this(null, null, 0)  // Needed for serialization
+
+  var hashTable = new FixedSizeHashTable(size)
+  build()
+
+  def build(): Unit = {
+    if (input == null) return
+    while (input.hasNext) {
+      val row = input.next()
+      val key: UnsafeRow = keyGenerator.apply(row).copy
+      if (!key.anyNull) {
+        val node = hashTable.findToInsert(key)
+        var buffer = node.getRows()
+        if (buffer == null) {
+          buffer = new CompactBuffer[UnsafeRow]()
+          node.setRows(buffer)
+        }
+        buffer += row.copy()
+      }
+    }
+  }
+
+  override def get(key: InternalRow): Seq[InternalRow] = {
+    hashTable.find(key.asInstanceOf[UnsafeRow])
+  }
+
+  override def readExternal(in: ObjectInput): Unit = {
+    hashTable = SparkSqlSerializer.deserialize(readBytes(in))
+  }
+
+  override def writeExternal(out: ObjectOutput): Unit = {
+    writeBytes(out, SparkSqlSerializer.serialize(hashTable))
   }
 }
 
@@ -235,16 +284,14 @@ private[joins] final class UnsafeHashedRelation(
       binaryMap.safeLookup(unsafeKey.getBaseObject, unsafeKey.getBaseOffset,
         unsafeKey.getSizeInBytes, loc)
       if (loc.isDefined) {
-        val buffer = CompactBuffer[UnsafeRow]()
-
         val base = loc.getValueAddress.getBaseObject
         var offset = loc.getValueAddress.getBaseOffset
         val last = loc.getValueAddress.getBaseOffset + loc.getValueLength
+        val buffer = CompactBuffer[UnsafeRow]()
         while (offset < last) {
-          val numFields = Platform.getInt(base, offset)
           val sizeInBytes = Platform.getInt(base, offset + 4)
+          val numFields = Platform.getInt(base, offset)
           offset += 8
-
           val row = new UnsafeRow
           row.pointTo(base, offset, numFields, sizeInBytes)
           buffer += row
