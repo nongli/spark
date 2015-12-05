@@ -38,6 +38,10 @@ private[spark] class CompactBuffer[T: ClassTag] extends Seq[T] with Serializable
   // Array for extra elements
   private var otherElements: Array[T] = null
 
+  def clear(): Unit = {
+    curSize = 0
+  }
+
   def apply(position: Int): T = {
     if (position < 0 || position >= curSize) {
       throw new IndexOutOfBoundsException
@@ -77,6 +81,10 @@ private[spark] class CompactBuffer[T: ClassTag] extends Seq[T] with Serializable
       otherElements(newIndex - 2) = value
     }
     this
+  }
+
+  def append(value: T): Unit = {
+    this += value
   }
 
   def ++= (values: TraversableOnce[T]): CompactBuffer[T] = {

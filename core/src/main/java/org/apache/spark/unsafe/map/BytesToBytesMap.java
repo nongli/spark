@@ -453,19 +453,18 @@ public final class BytesToBytesMap extends MemoryConsumer {
             final Object storedkeyBase = keyAddress.getBaseObject();
             final long storedkeyOffset = keyAddress.getBaseOffset();
             final boolean areEqual = ByteArrayMethods.arrayEquals(
-              keyBase,
-              keyOffset,
-              storedkeyBase,
-              storedkeyOffset,
-              keyLength
+                keyBase,
+                keyOffset,
+                storedkeyBase,
+                storedkeyOffset,
+                keyLength
             );
             if (areEqual) {
               return;
-            } else {
-              if (enablePerfMetrics) {
-                numHashCollisions++;
-              }
             }
+          }
+          if (enablePerfMetrics) {
+            numHashCollisions++;
           }
         }
       }
