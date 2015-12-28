@@ -138,6 +138,7 @@ private[sql] case class InsertIntoHadoopFsRelation(
             dataOutput,
             output,
             PartitioningUtils.DEFAULT_PARTITION_NAME,
+            sqlContext.conf.getConf(SQLConf.MAX_FILE_WRITERS_MEMORY_USAGE_RATIO),
             sqlContext.conf.getConf(SQLConf.PARTITION_MAX_FILES),
             isAppend)
         }

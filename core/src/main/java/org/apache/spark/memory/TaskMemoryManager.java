@@ -387,4 +387,9 @@ public class TaskMemoryManager {
   public long getMemoryConsumptionForThisTask() {
     return memoryManager.getExecutionMemoryUsageForTask(taskAttemptId);
   }
+
+  /**
+   * Returns the underlying memory manager.
+   */
+  public MemoryManager getMemoryManager() { return memoryManager; }
 }

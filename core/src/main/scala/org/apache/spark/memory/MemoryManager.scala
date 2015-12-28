@@ -60,6 +60,11 @@ private[spark] abstract class MemoryManager(
   def maxStorageMemory: Long
 
   /**
+   * Returns the maximum on heap memory.
+   */
+  def maxOnHeapMemory: Long = onHeapExecutionMemory
+
+  /**
    * Set the [[MemoryStore]] used by this manager to evict cached blocks.
    * This must be set after construction due to initialization ordering constraints.
    */
@@ -167,6 +172,10 @@ private[spark] abstract class MemoryManager(
     storageMemoryPool.memoryUsed
   }
 
+  final def maxCores: Int = {
+    if (numCores > 0) numCores else Runtime.getRuntime.availableProcessors()
+  }
+
   /**
    * Returns the execution memory consumption, in bytes, for the given task.
    */
@@ -201,14 +210,13 @@ private[spark] abstract class MemoryManager(
   val pageSizeBytes: Long = {
     val minPageSize = 1L * 1024 * 1024   // 1MB
     val maxPageSize = 64L * minPageSize  // 64MB
-    val cores = if (numCores > 0) numCores else Runtime.getRuntime.availableProcessors()
     // Because of rounding to next power of 2, we may have safetyFactor as 8 in worst case
     val safetyFactor = 16
     val maxTungstenMemory: Long = tungstenMemoryMode match {
       case MemoryMode.ON_HEAP => onHeapExecutionMemoryPool.poolSize
       case MemoryMode.OFF_HEAP => offHeapExecutionMemoryPool.poolSize
     }
-    val size = ByteArrayMethods.nextPowerOf2(maxTungstenMemory / cores / safetyFactor)
+    val size = ByteArrayMethods.nextPowerOf2(maxTungstenMemory / maxCores / safetyFactor)
     val default = math.min(maxPageSize, math.max(minPageSize, size))
     conf.getSizeAsBytes("spark.buffer.pageSize", default)
   }

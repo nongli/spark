@@ -17,6 +17,7 @@
 
 package org.apache.spark.sql.execution.datasources
 
+import java.lang.management.ManagementFactory
 import java.util.{Date, UUID}
 
 import scala.collection.JavaConverters._
@@ -24,18 +25,29 @@ import scala.collection.JavaConverters._
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.mapreduce._
 import org.apache.hadoop.mapreduce.lib.output.{FileOutputCommitter => MapReduceFileOutputCommitter}
+import org.apache.parquet.hadoop.ParquetOutputFormat
 import org.apache.spark._
 import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.mapred.SparkHadoopMapRedUtil
 import org.apache.spark.mapreduce.SparkHadoopMapReduceUtil
+import org.apache.spark.memory.MemoryMode
 import org.apache.spark.sql._
+
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.execution.UnsafeKVExternalSorter
 import org.apache.spark.sql.sources.{HadoopFsRelation, OutputWriter, OutputWriterFactory}
-import org.apache.spark.sql.types.{StructType, StringType}
-import org.apache.spark.util.SerializableConfiguration
+import org.apache.spark.sql.types.{StringType, StructType}
+import org.apache.spark.util.{SerializableConfiguration, Utils}
 
+
+private[sql] object BaseWriterContainer {
+  // The parquet memory manager is a singleton. We can only compute the configuration once.
+  private[sql] var parquetMemoryConfigured = false
+
+  // The amount of memory parquet should use. This is computed based on various memory settings.
+  private[sql] var parquetMemoryRatio = 0.1f
+}
 
 private[sql] abstract class BaseWriterContainer(
     @transient val relation: HadoopFsRelation,
@@ -81,6 +93,10 @@ private[sql] abstract class BaseWriterContainer(
 
   private var outputFormatClass: Class[_ <: OutputFormat[_, _]] = _
 
+  // Memory acquired from the task manager for the writers. This is only used for Parquet currently
+  // since Parquet can consume a lot of memory.
+  private var acquiredWriterMemory: Long = 0
+
   def writeRows(taskContext: TaskContext, iterator: Iterator[InternalRow]): Unit
 
   def driverSideSetup(): Unit = {
@@ -108,12 +124,71 @@ private[sql] abstract class BaseWriterContainer(
     outputCommitter.setupJob(jobContext)
   }
 
-  def executorSideSetup(taskContext: TaskContext): Unit = {
+  def executorSideSetup(taskContext: TaskContext, memRatio: Double, maxFiles: Int): Int = {
     setupIDs(taskContext.stageId(), taskContext.partitionId(), taskContext.attemptNumber())
     setupConf()
     taskAttemptContext = newTaskAttemptContext(serializableConf.value, taskAttemptId)
     outputCommitter = newOutputCommitter(taskAttemptContext)
     outputCommitter.setupTask(taskAttemptContext)
+
+    if (outputFormatClass == classOf[ParquetOutputFormat[_]]) {
+      val conf = SparkHadoopUtil.get.getConfigurationFromJobContext(taskAttemptContext)
+
+      // Configure the amount of memory parquet should use. The amount of memory is
+      // maxTasks * blockSize * numFiles.
+      // We will adjust numFiles to try to fit inside the memory budget.
+
+      // Bump this by a safety factor so parquet doesn't spew so much noise.
+      val blockSize = (ParquetOutputFormat.getLongBlockSize(conf) * 1.05).toLong
+      val maxTasks = TaskContext.get().taskMemoryManager().getMemoryManager.maxCores
+
+      // This is the maximum on heap memory available. We will give a portion of it to Parquet.
+      val maxMemory =
+        (TaskContext.get().taskMemoryManager().getMemoryManager.maxOnHeapMemory * memRatio).toLong
+
+      // Compute the maximum number of files per task, while staying under maxMemory. Constrain
+      // this to [1, maxFiles]
+      val maxFilesPerTask = maxMemory / (maxTasks * blockSize)
+      val numFilesPerTask = math.max(math.min(maxFilesPerTask, maxFiles), 1).toInt
+
+      if (numFilesPerTask < maxFiles) {
+        logWarning(s"Reducing max concurrent files to $numFilesPerTask to limit memory usage.")
+      }
+
+      if (maxFilesPerTask == 0) {
+        // We don't reserve any memory here. Doing so will likely make Spark OOM immediately (there
+        // was not enough memory for even 1 file). This is relatively common though when the data
+        // set is very small (each resulting parquet file is much less than `blockSize`). In this
+        // case, the upfront reservation is a waste and causes unnecessary OOMs.
+        logWarning("There is not enough memory to output a single file. Task might fail with OOM.")
+      } else {
+        // We have enough memory for parquet to reserve at least one file. Reserve this as execution
+        // memory to prevent Spark from using it.
+        acquiredWriterMemory = TaskContext.get().taskMemoryManager().acquireExecutionMemory(
+          numFilesPerTask * blockSize, MemoryMode.ON_HEAP, null)
+      }
+
+      if (!BaseWriterContainer.parquetMemoryConfigured) {
+        // Now we can configure parquet's memory manager.
+        val parquetMemory = blockSize * numFilesPerTask * maxTasks
+        val heapSize = ManagementFactory.getMemoryMXBean.getHeapMemoryUsage.getMax
+        val ratio = math.min(parquetMemory.toFloat / heapSize, 1.0f)
+
+        logInfo(s"Configuring parquet memory: numTasks=$maxTasks " +
+          s"blockSize=${Utils.bytesToString(blockSize)} " +
+          s"maxMemory=${Utils.bytesToString(maxMemory)} " +
+          s"maxFiles=$maxFiles numFilesPerTask=$numFilesPerTask " +
+          s"jvmHeapSize=${Utils.bytesToString(heapSize)} ratio=$ratio")
+
+        BaseWriterContainer.parquetMemoryConfigured = true
+        BaseWriterContainer.parquetMemoryRatio = ratio
+      }
+
+      conf.setFloat(ParquetOutputFormat.MEMORY_POOL_RATIO, BaseWriterContainer.parquetMemoryRatio)
+      numFilesPerTask
+    } else {
+      maxFiles
+    }
   }
 
   protected def getWorkPath: String = {
@@ -217,12 +292,16 @@ private[sql] abstract class BaseWriterContainer(
 
   def commitTask(): Unit = {
     SparkHadoopMapRedUtil.commitTask(outputCommitter, taskAttemptContext, jobId.getId, taskId.getId)
+    TaskContext.get().taskMemoryManager().releaseExecutionMemory(
+      acquiredWriterMemory, MemoryMode.ON_HEAP, null)
   }
 
   def abortTask(): Unit = {
     if (outputCommitter != null) {
       outputCommitter.abortTask(taskAttemptContext)
     }
+    TaskContext.get().taskMemoryManager().releaseExecutionMemory(
+      acquiredWriterMemory, MemoryMode.ON_HEAP, null)
     logError(s"Task attempt $taskAttemptId aborted.")
   }
 
@@ -249,7 +328,7 @@ private[sql] class DefaultWriterContainer(
   extends BaseWriterContainer(relation, job, isAppend) {
 
   def writeRows(taskContext: TaskContext, iterator: Iterator[InternalRow]): Unit = {
-    executorSideSetup(taskContext)
+    executorSideSetup(taskContext, 1, 1)
     val configuration = SparkHadoopUtil.get.getConfigurationFromJobContext(taskAttemptContext)
     configuration.set("spark.sql.sources.output.path", outputPath)
     val writer = newOutputWriter(getWorkPath)
@@ -313,15 +392,15 @@ private[sql] class DynamicPartitionWriterContainer(
     dataColumns: Seq[Attribute],
     inputSchema: Seq[Attribute],
     defaultPartitionName: String,
-    maxOpenFiles: Int,
+    writerMemoryRatio: Double,
+    targetMaxOpenFiles: Int,
     isAppend: Boolean)
   extends BaseWriterContainer(relation, job, isAppend) {
 
   def writeRows(taskContext: TaskContext, iterator: Iterator[InternalRow]): Unit = {
     val outputWriters = new java.util.HashMap[InternalRow, OutputWriter]
-    executorSideSetup(taskContext)
-
-    var outputWritersCleared = false
+    val maxOpenFiles = executorSideSetup(taskContext, writerMemoryRatio, targetMaxOpenFiles)
+    require(maxOpenFiles >= 1 && maxOpenFiles <= targetMaxOpenFiles)
 
     // Returns the partition key given an input row
     val getPartitionKey = UnsafeProjection.create(partitionColumns, inputSchema)
@@ -346,7 +425,7 @@ private[sql] class DynamicPartitionWriterContainer(
     try {
       // This will be filled in if we have to fall back on sorting.
       var sorter: UnsafeKVExternalSorter = null
-      while (iterator.hasNext && sorter == null) {
+      while (iterator.hasNext) {
         val inputRow = iterator.next()
         val currentKey = getPartitionKey(inputRow)
         var currentWriter = outputWriters.get(currentKey)
@@ -357,12 +436,14 @@ private[sql] class DynamicPartitionWriterContainer(
             outputWriters.put(currentKey.copy(), currentWriter)
             currentWriter.writeInternal(getOutputRow(inputRow))
           } else {
-            logInfo(s"Maximum partitions reached, falling back on sorting.")
-            sorter = new UnsafeKVExternalSorter(
-              StructType.fromAttributes(partitionColumns),
-              StructType.fromAttributes(dataColumns),
-              SparkEnv.get.blockManager,
-              TaskContext.get().taskMemoryManager().pageSizeBytes)
+            if (sorter == null) {
+              logInfo(s"Maximum partitions reached, falling back on sorting.")
+              sorter = new UnsafeKVExternalSorter(
+                StructType.fromAttributes(partitionColumns),
+                StructType.fromAttributes(dataColumns),
+                SparkEnv.get.blockManager,
+                TaskContext.get().taskMemoryManager().pageSizeBytes)
+            }
             sorter.insertKV(currentKey, getOutputRow(inputRow))
           }
         } else {
@@ -370,17 +451,15 @@ private[sql] class DynamicPartitionWriterContainer(
         }
       }
 
-      // If the sorter is not null that means that we reached the maxFiles above and need to finish
-      // using external sort.
+      // These writers are for partitions that did not need to be sorted. They are all done.
+      outputWriters.asScala.values.foreach(_.close())
+      outputWriters.clear()
+
+      // If the sorter is not null that means that we reached the maxOpenFiles above and need to
+      // finish using external sort.
       if (sorter != null) {
-        while (iterator.hasNext) {
-          val currentRow = iterator.next()
-          sorter.insertKV(getPartitionKey(currentRow), getOutputRow(currentRow))
-        }
-
-        logInfo(s"Sorting complete. Writing out partition files one at a time.")
-
         val sortedIterator = sorter.sortedIterator()
+        logInfo(s"Sorting complete. Writing out partition files one at a time.")
         var currentKey: InternalRow = null
         var currentWriter: OutputWriter = null
         try {
@@ -391,12 +470,7 @@ private[sql] class DynamicPartitionWriterContainer(
               }
               currentKey = sortedIterator.getKey.copy()
               logDebug(s"Writing partition: $currentKey")
-
-              // Either use an existing file from before, or open a new one.
-              currentWriter = outputWriters.remove(currentKey)
-              if (currentWriter == null) {
-                currentWriter = newOutputWriter(currentKey)
-              }
+              currentWriter = newOutputWriter(currentKey)
             }
 
             currentWriter.writeInternal(sortedIterator.getValue)
@@ -427,11 +501,8 @@ private[sql] class DynamicPartitionWriterContainer(
     }
 
     def clearOutputWriters(): Unit = {
-      if (!outputWritersCleared) {
-        outputWriters.asScala.values.foreach(_.close())
-        outputWriters.clear()
-        outputWritersCleared = true
-      }
+      outputWriters.asScala.values.foreach(_.close())
+      outputWriters.clear()
     }
 
     def commitTask(): Unit = {

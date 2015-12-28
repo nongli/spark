@@ -400,6 +400,13 @@ private[spark] object SQLConf {
       doc = "The maximum number of concurrent files to open before falling back on sorting when " +
             "writing out files using dynamic partitioning.")
 
+  val MAX_FILE_WRITERS_MEMORY_USAGE_RATIO =
+    doubleConf("spark.sql.sources.maxWritersMemoryRatio",
+      defaultValue = Some(0.75),
+      isPublic = false,
+      doc = "The maximum amount of memory (as a percentage of the heap) to allocate to output " +
+        "formats when writing data.")
+
   // The output committer class used by HadoopFsRelation. The specified class needs to be a
   // subclass of org.apache.hadoop.mapreduce.OutputCommitter.
   //
