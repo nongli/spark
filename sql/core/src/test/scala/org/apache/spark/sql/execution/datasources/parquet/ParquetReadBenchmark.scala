@@ -22,7 +22,7 @@ import scala.collection.JavaConverters._
 import scala.util.Try
 
 import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.sql.{SQLConf, SQLContext}
+import org.apache.spark.sql.{SaveMode, SQLConf, SQLContext}
 import org.apache.spark.util.{Benchmark, Utils}
 
 /**
@@ -33,6 +33,7 @@ import org.apache.spark.util.{Benchmark, Utils}
 object ParquetReadBenchmark {
   val conf = new SparkConf()
   conf.set("spark.sql.parquet.compression.codec", "snappy")
+  conf.set("spark.sql.shuffle.partitions", "4")
   val sc = new SparkContext("local[1]", "test-sql-context", conf)
   val sqlContext = new SQLContext(sc)
 
@@ -229,8 +230,75 @@ object ParquetReadBenchmark {
     }
   }
 
+  val tpcds = Seq(
+    ("q19", """
+              |-- start query 1 in stream 0 using template query19.tpl
+              |select
+              |  i_brand_id,
+              |  i_brand,
+              |  i_manufact_id,
+              |  i_manufact,
+              |  sum(ss_ext_sales_price) ext_price
+              |from
+              |  store_sales
+              |  join item on (store_sales.ss_item_sk = item.i_item_sk)
+              |  join customer on (store_sales.ss_customer_sk = customer.c_customer_sk)
+              |  join customer_address on (customer.c_current_addr_sk = customer_address.ca_address_sk)
+              |  join store on (store_sales.ss_store_sk = store.s_store_sk)
+              |  join date_dim on (store_sales.ss_sold_date_sk = date_dim.d_date_sk)
+              |where
+              |  --ss_date between '1999-11-01' and '1999-11-30'
+              |  ss_sold_date_sk between 2451484 and 2451513
+              |  and d_moy = 11
+              |  and d_year = 1999
+              |  and i_manager_id = 7
+              |  and substr(ca_zip, 1, 5) <> substr(s_zip, 1, 5)
+              |group by
+              |  i_brand,
+              |  i_brand_id,
+              |  i_manufact_id,
+              |  i_manufact
+              |order by
+              |  ext_price desc,
+              |  i_brand,
+              |  i_brand_id,
+              |  i_manufact_id,
+              |  i_manufact
+              |limit 100
+              |-- end query 1 in stream 0 using template query19.tpl
+            """.stripMargin) :: Nil).toArray
+
+
+  def tpcdsBenchmark(): Unit = {
+    val HOME = "/Users/nong/Data/tpcds-sf10/"
+    sqlContext.read.parquet(HOME + "customer").registerTempTable("customer")
+    sqlContext.read.parquet(HOME + "customer_address").registerTempTable("customer_address")
+    sqlContext.read.parquet(HOME + "date_dim").registerTempTable("date_dim")
+    sqlContext.read.parquet(HOME + "item").registerTempTable("item")
+    sqlContext.read.parquet(HOME + "store").registerTempTable("store")
+    //sqlContext.read.parquet(HOME + "store_sales").registerTempTable("store_sales")
+    sqlContext.read.parquet(HOME + "store_sales_snappy").registerTempTable("store_sales")
+
+
+    val benchmark = new Benchmark("TPCDS", 28800501)
+    benchmark.addCase("Q19 Spark 1.6 gzip") { i =>
+      val query = sqlContext.sql(tpcds(0).head._2)
+      sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "false")
+      sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "false")
+      query.show
+    }
+    benchmark.addCase("Q19 Spark master gzip") { i =>
+      val query = sqlContext.sql(tpcds(0).head._2)
+      sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "true")
+      sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "true")
+      query.show
+    }
+    benchmark.run()
+  }
+
   def main(args: Array[String]): Unit = {
-    intScanBenchmark(1024 * 1024 * 15)
-    intStringScanBenchmark(1024 * 1024 * 10)
+    //intScanBenchmark(1024 * 1024 * 15)
+    //intStringScanBenchmark(1024 * 1024 * 10)
+    tpcdsBenchmark()
   }
 }
