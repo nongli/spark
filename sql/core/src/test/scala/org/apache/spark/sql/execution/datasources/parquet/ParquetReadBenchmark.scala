@@ -95,11 +95,13 @@ object ParquetReadBenchmark {
           files.map(_.asInstanceOf[String]).foreach { p =>
             val reader = new UnsafeRowParquetRecordReader
             reader.initialize(p, ("id" :: Nil).asJava)
+            reader.resultBatch
 
             while (reader.nextKeyValue()) {
               val record = reader.getCurrentValue
               if (!record.isNullAt(0)) sum += record.getInt(0)
             }
+            println(sum)
             reader.close()
           }
         }
@@ -121,6 +123,7 @@ object ParquetReadBenchmark {
                   i += 1
                 }
               }
+              println(sum)
             } finally {
               reader.close()
             }
@@ -142,6 +145,7 @@ object ParquetReadBenchmark {
                   if (!record.isNullAt(0)) sum += record.getInt(0)
                 }
               }
+              println(sum)
             } finally {
               reader.close()
             }
@@ -156,7 +160,7 @@ object ParquetReadBenchmark {
         SQL Parquet MR                          1844.09             8.53         0.73 X
         SQL Parquet Vectorized                  1062.04            14.81         1.27 X
         */
-        sqlBenchmark.run()
+        //sqlBenchmark.run()
 
         /*
         Intel(R) Core(TM) i7-4870HQ CPU @ 2.50GHz
@@ -279,6 +283,8 @@ object ParquetReadBenchmark {
     //sqlContext.read.parquet(HOME + "store_sales").registerTempTable("store_sales")
     sqlContext.read.parquet(HOME + "store_sales_snappy").registerTempTable("store_sales")
 
+    sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "true")
+    sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "true")
 
     val benchmark = new Benchmark("TPCDS", 28800501)
     //benchmark.addCase("Q19 Spark 1.6") { i =>
@@ -289,14 +295,17 @@ object ParquetReadBenchmark {
     //}
 
     val query = sqlContext.sql(tpcds(0).head._2)
-    query.show
+    //query.show
+    //sqlContext.sql("select count(ss_store_sk), count(ss_sold_date_sk), count(ss_ext_sales_price), count(ss_customer_sk), count(ss_item_sk) from store_sales").show
+    //sqlContext.sql("select count(ss_item_sk) from store_sales").show
+
     benchmark.addCase("Q19 Spark master") { i =>
       val query = sqlContext.sql(tpcds(0).head._2)
-      sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "true")
-      sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "true")
-      query.show
+
+      sqlContext.sql("select count(ss_item_sk) from store_sales").show
+      //query.show
     }
-    //benchmark.run()
+    benchmark.run()
   }
 
   def main(args: Array[String]): Unit = {

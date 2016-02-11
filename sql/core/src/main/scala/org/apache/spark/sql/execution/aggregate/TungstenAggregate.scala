@@ -246,6 +246,12 @@ case class TungstenAggregate(
        | // update aggregation buffer
        | ${updates.mkString("\n").trim}
      """.stripMargin
+
+    s"""
+       | // do aggregate
+       | if (parquetrelation_isNull) continue;
+       | agg_bufValue++;
+       """.stripMargin
   }
 
   private val groupingAttributes = groupingExpressions.map(_.toAttribute)
