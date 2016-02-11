@@ -33,6 +33,7 @@ import org.apache.spark.util.{Benchmark, Utils}
 object ParquetReadBenchmark {
   val conf = new SparkConf()
   conf.set("spark.sql.parquet.compression.codec", "snappy")
+  conf.set("spark.sql.shuffle.partitions", "4")
   val sc = new SparkContext("local[1]", "test-sql-context", conf)
   val sqlContext = new SQLContext(sc)
 
@@ -229,8 +230,126 @@ object ParquetReadBenchmark {
     }
   }
 
+  val tpcds = Seq(
+    ("q19", """
+              |-- start query 1 in stream 0 using template query19.tpl
+              |select
+              |  i_brand_id,
+              |  i_brand,
+              |  i_manufact_id,
+              |  i_manufact,
+              |  sum(ss_ext_sales_price) ext_price
+              |from
+              |  store_sales
+              |  join item on (store_sales.ss_item_sk = item.i_item_sk)
+              |  join customer on (store_sales.ss_customer_sk = customer.c_customer_sk)
+              |  join customer_address on (customer.c_current_addr_sk = customer_address.ca_address_sk)
+              |  join store on (store_sales.ss_store_sk = store.s_store_sk)
+              |  join date_dim on (store_sales.ss_sold_date_sk = date_dim.d_date_sk)
+              |where
+              |  --ss_date between '1999-11-01' and '1999-11-30'
+              |  ss_sold_date_sk between 2451484 and 2451513
+              |  and d_moy = 11
+              |  and d_year = 1999
+              |  and i_manager_id = 7
+              |  and substr(ca_zip, 1, 5) <> substr(s_zip, 1, 5)
+              |group by
+              |  i_brand,
+              |  i_brand_id,
+              |  i_manufact_id,
+              |  i_manufact
+              |order by
+              |  ext_price desc,
+              |  i_brand,
+              |  i_brand_id,
+              |  i_manufact_id,
+              |  i_manufact
+              |limit 100
+              |-- end query 1 in stream 0 using template query19.tpl
+            """.stripMargin) :: Nil).toArray
+
+  def tpcdsBenchmark(): Unit = {
+    val HOME = "/Users/nong/Data/tpcds-sf10/"
+    val dir = HOME + "store_sales_snappy"
+    sqlContext.read.parquet(HOME + "customer").registerTempTable("customer")
+    sqlContext.read.parquet(HOME + "customer_address").registerTempTable("customer_address")
+    sqlContext.read.parquet(HOME + "date_dim").registerTempTable("date_dim")
+    sqlContext.read.parquet(HOME + "item").registerTempTable("item")
+    sqlContext.read.parquet(HOME + "store").registerTempTable("store")
+    sqlContext.read.parquet(dir).registerTempTable("store_sales")
+
+    sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "true")
+    sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "true")
+
+    val benchmark = new Benchmark("TPCDS", 28800501)
+    val query = sqlContext.sql(tpcds(0).head._2)
+
+    val files = SpecificParquetRecordReaderBase.listDirectory(new File(dir)).toArray
+    // Driving the parquet reader directly without Spark.
+    benchmark.addCase("ParquetReader") { num =>
+      var sum = 0L
+      files.map(_.asInstanceOf[String]).foreach { p =>
+        val reader = new UnsafeRowParquetRecordReader
+        reader.initialize(p, ("ss_store_sk" :: "ss_sold_date_sk" :: "ss_ext_sales_price"
+          :: "ss_customer_sk" :: "ss_item_sk" :: Nil).asJava)
+        val batch = reader.resultBatch()
+        while (reader.nextBatch()) {
+          val it = batch.rowIterator()
+          while (it.hasNext) {
+            val record = it.next()
+            if (!record.isNullAt(0)) sum += 1
+            if (!record.isNullAt(1)) sum += 1
+            if (!record.isNullAt(2)) sum += 1
+            if (!record.isNullAt(3)) sum += 1
+            if (!record.isNullAt(4)) sum += 1
+          }
+        }
+        println(sum)
+        reader.close()
+      }
+    }
+
+    benchmark.addCase("counts") { i =>
+      sqlContext.sql(
+        s"""
+           | select count(ss_store_sk), count(ss_sold_date_sk), count(ss_ext_sales_price),
+           | count(ss_customer_sk), count(ss_item_sk) from store_sales
+         """.stripMargin).show
+    }
+
+    benchmark.addCase("Q19") { i =>
+      query.show(5)
+    }
+
+    /**
+    Intel(R) Core(TM) i7-4870HQ CPU @ 2.50GHz
+    TPCDS Snappy:                       Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+    -------------------------------------------------------------------------------------------
+    ParquetReader                            2052 / 2119         14.0          71.3       1.0X
+    counts                                   2580 / 2633         11.2          89.6       0.8X
+    Q19                                      3607 / 3720          8.0         125.2       0.6X
+
+    counts (master)                          5608 / 5732          5.1         194.7       0.3X
+    Q19 (master)                             5418 / 5682          5.3         188.1       0.4X
+
+    TPCDS Uncompressed:                Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+    -------------------------------------------------------------------------------------------
+    ParquetReader                            1929 / 2031         14.9          67.0       1.0X
+    counts                                   2427 / 2460         11.9          84.3       0.8X
+    Q19                                      3421 / 3598          8.4         118.8       0.6X
+
+    TPCDS GZIP:                        Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+    -------------------------------------------------------------------------------------------
+    ParquetReader                            3475 / 3626          8.3         120.6       1.0X
+    counts                                   3559 / 3727          8.1         123.6       1.0X
+    Q19                                      4876 / 5139          5.9         169.3       0.7X
+     */
+    benchmark.run()
+  }
+
   def main(args: Array[String]): Unit = {
-    intScanBenchmark(1024 * 1024 * 15)
-    intStringScanBenchmark(1024 * 1024 * 10)
+    //intScanBenchmark(1024 * 1024 * 15)
+    //intStringScanBenchmark(1024 * 1024 * 10)
+    tpcdsBenchmark()
   }
 }

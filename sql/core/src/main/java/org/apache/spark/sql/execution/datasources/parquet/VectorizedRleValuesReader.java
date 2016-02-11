@@ -189,7 +189,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
         case RLE:
           if (currentValue == level) {
             data.readIntegers(n, c, rowId);
-            c.putNotNulls(rowId, n);
           } else {
             c.putNulls(rowId, n);
           }
@@ -198,7 +197,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
           for (int i = 0; i < n; ++i) {
             if (currentBuffer[currentBufferIdx++] == level) {
               c.putInt(rowId + i, data.readInteger());
-              c.putNotNull(rowId + i);
             } else {
               c.putInt(rowId + i, nullValue);
               c.putNull(rowId + i);
@@ -223,7 +221,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
         case RLE:
           if (currentValue == level) {
             data.readBooleans(n, c, rowId);
-            c.putNotNulls(rowId, n);
           } else {
             c.putNulls(rowId, n);
           }
@@ -232,7 +229,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
           for (int i = 0; i < n; ++i) {
             if (currentBuffer[currentBufferIdx++] == level) {
               c.putBoolean(rowId + i, data.readBoolean());
-              c.putNotNull(rowId + i);
             } else {
               c.putNull(rowId + i);
             }
@@ -257,7 +253,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
             for (int i = 0; i < n; i++) {
               c.putLong(rowId + i, data.readInteger());
             }
-            c.putNotNulls(rowId, n);
           } else {
             c.putNulls(rowId, n);
           }
@@ -266,7 +261,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
           for (int i = 0; i < n; ++i) {
             if (currentBuffer[currentBufferIdx++] == level) {
               c.putLong(rowId + i, data.readInteger());
-              c.putNotNull(rowId + i);
             } else {
               c.putNull(rowId + i);
             }
@@ -289,7 +283,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
         case RLE:
           if (currentValue == level) {
             data.readBytes(n, c, rowId);
-            c.putNotNulls(rowId, n);
           } else {
             c.putNulls(rowId, n);
           }
@@ -298,7 +291,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
           for (int i = 0; i < n; ++i) {
             if (currentBuffer[currentBufferIdx++] == level) {
               c.putByte(rowId + i, data.readByte());
-              c.putNotNull(rowId + i);
             } else {
               c.putNull(rowId + i);
             }
@@ -321,7 +313,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
         case RLE:
           if (currentValue == level) {
             data.readLongs(n, c, rowId);
-            c.putNotNulls(rowId, n);
           } else {
             c.putNulls(rowId, n);
           }
@@ -330,7 +321,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
           for (int i = 0; i < n; ++i) {
             if (currentBuffer[currentBufferIdx++] == level) {
               c.putLong(rowId + i, data.readLong());
-              c.putNotNull(rowId + i);
             } else {
               c.putNull(rowId + i);
             }
@@ -353,7 +343,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
         case RLE:
           if (currentValue == level) {
             data.readFloats(n, c, rowId);
-            c.putNotNulls(rowId, n);
           } else {
             c.putNulls(rowId, n);
           }
@@ -362,7 +351,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
           for (int i = 0; i < n; ++i) {
             if (currentBuffer[currentBufferIdx++] == level) {
               c.putFloat(rowId + i, data.readFloat());
-              c.putNotNull(rowId + i);
             } else {
               c.putNull(rowId + i);
             }
@@ -385,7 +373,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
         case RLE:
           if (currentValue == level) {
             data.readDoubles(n, c, rowId);
-            c.putNotNulls(rowId, n);
           } else {
             c.putNulls(rowId, n);
           }
@@ -394,7 +381,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
           for (int i = 0; i < n; ++i) {
             if (currentBuffer[currentBufferIdx++] == level) {
               c.putDouble(rowId + i, data.readDouble());
-              c.putNotNull(rowId + i);
             } else {
               c.putNull(rowId + i);
             }
@@ -416,7 +402,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
       switch (mode) {
         case RLE:
           if (currentValue == level) {
-            c.putNotNulls(rowId, n);
             data.readBinary(n, c, rowId);
           } else {
             c.putNulls(rowId, n);
@@ -425,7 +410,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
         case PACKED:
           for (int i = 0; i < n; ++i) {
             if (currentBuffer[currentBufferIdx++] == level) {
-              c.putNotNull(rowId + i);
               data.readBinary(1, c, rowId + i);
             } else {
               c.putNull(rowId + i);
