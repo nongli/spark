@@ -193,7 +193,6 @@ private[spark] class SqlNewHadoopRDD[V: ClassTag](
 
       private[this] var havePair = false
       private[this] var finished = false
-      private var count: Long = 0
 
       override def hasNext: Boolean = {
         if (context.isInterrupted) {
@@ -218,20 +217,19 @@ private[spark] class SqlNewHadoopRDD[V: ClassTag](
         }
         havePair = false
 
-
+        /*
         if (!finished) {
-          //inputMetrics.incRecordsReadInternal(1)
-          count += 1
+          inputMetrics.incRecordsReadInternal(1)
         }
-        //if (inputMetrics.recordsRead % SparkHadoopUtil.UPDATE_INPUT_METRICS_INTERVAL_RECORDS == 0) {
+        if (inputMetrics.recordsRead % SparkHadoopUtil.UPDATE_INPUT_METRICS_INTERVAL_RECORDS == 0) {
           updateBytesRead()
-        //}
+        }
+        */
         reader.getCurrentValue
       }
 
       private def close() {
         if (reader != null) {
-          inputMetrics.incRecordsReadInternal(count)
           SqlNewHadoopRDDState.unsetInputFileName()
           // Close the reader and release it. Note: it's very important that we don't close the
           // reader more than once, since that exposes us to MAPREDUCE-5918 when running against

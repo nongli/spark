@@ -91,15 +91,14 @@ case class Filter(condition: Expression, child: SparkPlan) extends UnaryNode wit
     ctx.currentVars = input
     val eval = expr.gen(ctx)
     val nullCheck = if (expr.nullable) {
-      s"!${eval.isNull} &&"
+      s"${eval.isNull} ||"
     } else {
       s""
     }
     s"""
        | ${eval.code}
-       | if ($nullCheck ${eval.value}) {
-       |   ${consume(ctx, ctx.currentVars)}
-       | }
+       | if ($nullCheck !${eval.value}) continue;
+       | ${consume(ctx, ctx.currentVars)}
      """.stripMargin
   }
 

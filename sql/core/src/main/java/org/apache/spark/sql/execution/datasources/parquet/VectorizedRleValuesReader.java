@@ -257,7 +257,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
             for (int i = 0; i < n; i++) {
               c.putLong(rowId + i, data.readInteger());
             }
-            c.putNotNulls(rowId, n);
           } else {
             c.putNulls(rowId, n);
           }
@@ -266,7 +265,6 @@ public final class VectorizedRleValuesReader extends ValuesReader
           for (int i = 0; i < n; ++i) {
             if (currentBuffer[currentBufferIdx++] == level) {
               c.putLong(rowId + i, data.readInteger());
-              c.putNotNull(rowId + i);
             } else {
               c.putNull(rowId + i);
             }

@@ -22,7 +22,7 @@ import scala.collection.JavaConverters._
 import scala.util.Try
 
 import org.apache.spark.{SparkConf, SparkContext}
-import org.apache.spark.sql.{SaveMode, SQLConf, SQLContext}
+import org.apache.spark.sql.{SQLConf, SQLContext}
 import org.apache.spark.util.{Benchmark, Utils}
 
 /**
@@ -275,35 +275,55 @@ object ParquetReadBenchmark {
 
   def tpcdsBenchmark(): Unit = {
     val HOME = "/Users/nong/Data/tpcds-sf10/"
+    val dir = HOME + "store_sales_snappy"
     sqlContext.read.parquet(HOME + "customer").registerTempTable("customer")
     sqlContext.read.parquet(HOME + "customer_address").registerTempTable("customer_address")
     sqlContext.read.parquet(HOME + "date_dim").registerTempTable("date_dim")
     sqlContext.read.parquet(HOME + "item").registerTempTable("item")
     sqlContext.read.parquet(HOME + "store").registerTempTable("store")
     //sqlContext.read.parquet(HOME + "store_sales").registerTempTable("store_sales")
-    sqlContext.read.parquet(HOME + "store_sales_snappy").registerTempTable("store_sales")
+    sqlContext.read.parquet(dir).registerTempTable("store_sales")
 
     sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "true")
     sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "true")
 
     val benchmark = new Benchmark("TPCDS", 28800501)
-    //benchmark.addCase("Q19 Spark 1.6") { i =>
-    //  val query = sqlContext.sql(tpcds(0).head._2)
-    //  sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "false")
-    //  sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "false")
-    //  query.show
-    //}
-
     val query = sqlContext.sql(tpcds(0).head._2)
+
+    val files = SpecificParquetRecordReaderBase.listDirectory(new File(dir)).toArray
+    // Driving the parquet reader directly without Spark.
+    benchmark.addCase("ParquetReader") { num =>
+      var sum = 0L
+      files.map(_.asInstanceOf[String]).foreach { p =>
+        val reader = new UnsafeRowParquetRecordReader
+        reader.initialize(p, ("ss_store_sk" :: "ss_sold_date_sk" :: "ss_ext_sales_price"
+          :: "ss_customer_sk" :: "ss_item_sk" :: Nil).asJava)
+        val batch = reader.resultBatch()
+        while (reader.nextBatch()) {
+          val it = batch.rowIterator()
+          while (it.hasNext) {
+            val record = it.next()
+            if (!record.isNullAt(0)) sum += 1
+            if (!record.isNullAt(1)) sum += 1
+            if (!record.isNullAt(2)) sum += 1
+            if (!record.isNullAt(3)) sum += 1
+            if (!record.isNullAt(4)) sum += 1
+          }
+        }
+        println(sum)
+        reader.close()
+      }
+    }
+
     //query.show
     //sqlContext.sql("select count(ss_store_sk), count(ss_sold_date_sk), count(ss_ext_sales_price), count(ss_customer_sk), count(ss_item_sk) from store_sales").show
     //sqlContext.sql("select count(ss_item_sk) from store_sales").show
 
-    benchmark.addCase("Q19 Spark master") { i =>
-      val query = sqlContext.sql(tpcds(0).head._2)
-
-      sqlContext.sql("select count(ss_item_sk) from store_sales").show
-      //query.show
+    benchmark.addCase("Q19") { i =>
+      //sqlContext.sql("select count(ss_ext_sales_price) from store_sales").show
+      //sqlContext.sql("select count(ss_store_sk), count(ss_sold_date_sk), count(ss_ext_sales_price), count(ss_customer_sk), count(ss_item_sk) from store_sales").show
+      //sqlContext.sql("select count(ss_store_sk), count(ss_sold_date_sk), count(ss_customer_sk), count(ss_item_sk) from store_sales").show
+      query.show
     }
     benchmark.run()
   }
