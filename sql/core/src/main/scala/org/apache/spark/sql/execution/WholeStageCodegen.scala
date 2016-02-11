@@ -257,7 +257,7 @@ case class WholeStageCodegen(plan: CodegenSupport, children: Seq[SparkPlan])
       """
 
     // try to compile, helpful for debug
-    // println(s"${CodeFormatter.format(source)}")
+    println(s"${CodeFormatter.format(source)}")
     CodeGenerator.compile(source)
 
     plan.upstream().mapPartitions { iter =>

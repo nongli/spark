@@ -281,19 +281,22 @@ object ParquetReadBenchmark {
 
 
     val benchmark = new Benchmark("TPCDS", 28800501)
-    benchmark.addCase("Q19 Spark 1.6 gzip") { i =>
-      val query = sqlContext.sql(tpcds(0).head._2)
-      sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "false")
-      sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "false")
-      query.show
-    }
-    benchmark.addCase("Q19 Spark master gzip") { i =>
+    //benchmark.addCase("Q19 Spark 1.6") { i =>
+    //  val query = sqlContext.sql(tpcds(0).head._2)
+    //  sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "false")
+    //  sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "false")
+    //  query.show
+    //}
+
+    val query = sqlContext.sql(tpcds(0).head._2)
+    query.show
+    benchmark.addCase("Q19 Spark master") { i =>
       val query = sqlContext.sql(tpcds(0).head._2)
       sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "true")
       sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "true")
       query.show
     }
-    benchmark.run()
+    //benchmark.run()
   }
 
   def main(args: Array[String]): Unit = {

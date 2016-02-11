@@ -37,6 +37,7 @@ public class BufferedRowIterator {
   protected Iterator<InternalRow> input;
   // used when there is no column in output
   protected UnsafeRow unsafeRow = new UnsafeRow(0);
+  protected long startTime = -1;
 
   public boolean hasNext() throws IOException {
     if (currentRows.isEmpty()) {

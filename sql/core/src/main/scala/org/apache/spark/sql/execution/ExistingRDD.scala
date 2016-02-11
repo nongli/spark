@@ -134,6 +134,7 @@ private[sql] case class PhysicalRDD(
     ctx.currentVars = null
     val columns = exprs.map(_.gen(ctx))
     s"""
+       | if (startTime < 0) startTime = System.currentTimeMillis();
        | while (input.hasNext()) {
        |   InternalRow $row = (InternalRow) input.next();
        |   ${columns.map(_.code).mkString("\n").trim}
@@ -142,6 +143,8 @@ private[sql] case class PhysicalRDD(
        |     return;
        |   }
        | }
+       | long end = System.currentTimeMillis();
+       | System.out.println("pipeline $simpleString : " + (end - startTime));
      """.stripMargin
   }
 }
