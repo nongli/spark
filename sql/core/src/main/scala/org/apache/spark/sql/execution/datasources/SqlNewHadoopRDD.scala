@@ -215,13 +215,18 @@ private[spark] class SqlNewHadoopRDD[V: ClassTag](
         if (!hasNext) {
           throw new java.util.NoSuchElementException("End of stream")
         }
+
         havePair = false
+
+        /*
         if (!finished) {
           inputMetrics.incRecordsReadInternal(1)
         }
         if (inputMetrics.recordsRead % SparkHadoopUtil.UPDATE_INPUT_METRICS_INTERVAL_RECORDS == 0) {
           updateBytesRead()
         }
+        */
+
         reader.getCurrentValue
       }
 
