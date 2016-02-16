@@ -34,6 +34,10 @@ object ParquetReadBenchmark {
   val conf = new SparkConf()
   conf.set("spark.sql.parquet.compression.codec", "snappy")
   conf.set("spark.sql.shuffle.partitions", "4")
+  conf.set("spark.driver.memory", "3g")
+  conf.set("spark.executor.memory", "3g")
+  conf.set("spark.sql.autoBroadcastJoinThreshold", (100 * 1024 * 1024).toString)
+
   val sc = new SparkContext("local[1]", "test-sql-context", conf)
   val sqlContext = new SQLContext(sc)
 
@@ -1028,11 +1032,31 @@ object ParquetReadBenchmark {
                  |  max(ss_store_sk) as max_ss_store_sk,
                  |  max(ss_promo_sk) as max_ss_promo_sk
                  |from store_sales
-               """.stripMargin)).toArray
+               """.stripMargin),
+    ("filter", """
+                | select count(*) from store_sales where ss_store_sk = 1
+              """.stripMargin),
+    ("join", """
+                | select count(i_current_price) from store_sales join item
+                |   on (store_sales.ss_item_sk = item.i_item_sk)
+                | where
+                |   i_category = 'Sports'
+                |   and ss_sold_date_sk between 2451911 and 2451941
+              """.stripMargin),
+    ("agg", """
+                | select count(ss_promo_sk) from store_sales
+                | where ss_sold_date_sk > 2451911
+                | group by ss_sold_date_sk
+              """.stripMargin),
+    ("join3", """
+              | select count(i_category), count(s_county) from store_sales
+              |   join item on (store_sales.ss_item_sk = item.i_item_sk)
+              |   join store on (store_sales.ss_store_sk = store.s_store_sk)
+            """.stripMargin)).toArray
 
   def tpcdsSetup(): String = {
     val HOME = "/Users/nong/Data/tpcds-sf10/"
-    val dir = HOME + "store_sales_snappy"
+    val dir = HOME + "store_sales_snappy_big"
     sqlContext.read.parquet(HOME + "customer").registerTempTable("customer")
     sqlContext.read.parquet(HOME + "customer_address").registerTempTable("customer_address")
     sqlContext.read.parquet(HOME + "customer_demographics").registerTempTable("customer_demographics")
@@ -1051,14 +1075,13 @@ object ParquetReadBenchmark {
     sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "true")
     sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "true")
 
-    val benchmark = new Benchmark("TPCDS Snappy", 28800501)
-    tpcds.foreach( query => {
+    val benchmark = new Benchmark("TPCDS Snappy", 28800501 * 4, 1)
+    tpcds.filter(q=> q._1 == "q55").foreach( query => {
       benchmark.addCase(query._1) { i =>
         sqlContext.sql(query._2).show(2)
       }
     })
     benchmark.run
-    Thread.sleep(10000)
   }
 
   def tpcdsBenchmark(): Unit = {

@@ -227,6 +227,7 @@ private[spark] class SqlNewHadoopRDD[V: ClassTag](
         }
         */
 
+
         reader.getCurrentValue
       }
 
