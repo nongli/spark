@@ -119,7 +119,8 @@ class AttributeSet private (val baseSet: Set[AttributeEquals])
 
   // We must force toSeq to not be strict otherwise we end up with a [[Stream]] that captures all
   // sorts of things in its closure.
-  override def toSeq: Seq[Attribute] = baseSet.map(_.a).toArray.toSeq
+  // Return the attributes sorted by name so we have stable plans.
+  override def toSeq: Seq[Attribute] = baseSet.map(_.a).toArray.toSeq.sortBy(_.name)
 
   override def toString: String = "{" + baseSet.map(_.a).mkString(", ") + "}"
 

@@ -26,6 +26,7 @@ import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.expressions.codegen._
 import org.apache.spark.sql.catalyst.plans.physical._
 import org.apache.spark.sql.execution._
+import org.apache.spark.sql.execution.joins.HashJoin
 import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.unsafe.KVIterator
@@ -445,15 +446,167 @@ case class TungstenAggregate(
     val iterTerm = ctx.freshName("mapIter")
     ctx.addMutableState(classOf[KVIterator[UnsafeRow, UnsafeRow]].getName, iterTerm, "")
 
+    require(child.isInstanceOf[Project])
+    require(child.asInstanceOf[Project].child.isInstanceOf[HashJoin])
+
     val doAgg = ctx.freshName("doAggregateWithKeys")
-    ctx.addNewFunction(doAgg,
-      s"""
+    if (doAgg != null) {
+      child.asInstanceOf[CodegenSupport].produce(ctx, this)
+      ctx.addNewFunction(doAgg,
+        s"""
         private void $doAgg() throws java.io.IOException {
-          ${child.asInstanceOf[CodegenSupport].produce(ctx, this)}
+          if (startTimeMs == -1) startTimeMs = System.currentTimeMillis();
+
+          while (input.hasNext()) {
+            InternalRow rddScan_row = (InternalRow) input.next();
+            boolean rddScan_isNull = rddScan_row.isNullAt(2);
+            if (rddScan_isNull) continue;
+            int rddScan_value = rddScan_row.getInt(2);
+            if (!(rddScan_value >= 2452245)) continue;
+            if (!(rddScan_value <= 2452275)) continue;
+
+            //// generate join key
+            final boolean rddScan_isNull2 = rddScan_row.isNullAt(1);
+            if (rddScan_isNull2) continue;
+            int rddScan_value2 = rddScan_row.getInt(1);
+            long bhj_value = (long)rddScan_value2;
+
+            // find matches from HashedRelation
+            UnsafeRow bhj_matched = (UnsafeRow)bhj_relation1.getValue(bhj_value);
+            if (bhj_matched == null) continue;
+
+            boolean bhj_isNull2 = bhj_matched.isNullAt(0);
+            if (rddScan_isNull) continue;
+            long bhj_value5 = (long)rddScan_value;
+
+            boolean bhj_isNull3 = bhj_matched.isNullAt(1);
+            UTF8String bhj_value3 = bhj_isNull3 ? null : (bhj_matched.getUTF8String(0));
+
+            boolean bhj_isNull4 = bhj_matched.isNullAt(2);
+            int bhj_value4 = bhj_isNull4 ? -1 : (bhj_matched.getInt(1));
+
+            // find matches from HashedRelation
+            UnsafeRow bhj_matched1 = (UnsafeRow)bhj_relation.getValue(bhj_value5);
+            if (bhj_matched1 == null) continue;
+
+            boolean bhj_isNull7 = bhj_matched1.isNullAt(0);
+            int bhj_value7 = bhj_isNull7 ? -1 : (bhj_matched1.getInt(0));
+
+            // generate grouping key
+            agg_holder.reset();
+            agg_rowWriter.zeroOutNullBytes();
+
+            if (bhj_isNull3) {
+              agg_rowWriter.setNullAt(0);
+            } else {
+              agg_rowWriter.write(0, bhj_value3);
+            }
+
+            if (bhj_isNull4) {
+              agg_rowWriter.setNullAt(1);
+            } else {
+              agg_rowWriter.write(1, bhj_value4);
+            }
+            agg_result.setTotalSize(agg_holder.totalSize());
+
+            // Get aggregated buffer
+            UnsafeRow agg_aggBuffer = null;
+            agg_aggBuffer = agg_hashMap.getAggregationBufferFromUnsafeRow(agg_result);
+            if (agg_aggBuffer == null) {
+              if (agg_sorter == null) {
+              agg_sorter = agg_hashMap.destructAndCreateExternalSorter();
+              } else {
+                agg_sorter.merge(agg_hashMap.destructAndCreateExternalSorter());
+              }
+
+              // the hash map had be spilled, it should have enough memory now,
+              // try  to allocate buffer again.
+              agg_aggBuffer = agg_hashMap.getAggregationBufferFromUnsafeRow(agg_result);
+              if (agg_aggBuffer == null) {
+              // failed to allocate the first page
+                throw new OutOfMemoryError("No enough memory for aggregation");
+              }
+            }
+
+            // evaluate aggregate function
+            boolean agg_isNull3 = true;
+            long agg_value3 = -1L;
+            /* coalesce(input[0, bigint],cast(0 as bigint)) */
+            /* input[0, bigint] */
+            boolean agg_isNull5 = agg_aggBuffer.isNullAt(0);
+            long agg_value5 = agg_isNull5 ? -1L : (agg_aggBuffer.getLong(0));
+            boolean agg_isNull4 = agg_isNull5;
+            long agg_value4 = agg_value5;
+
+            if (agg_isNull4) {
+               /* cast(0 as bigint) */
+               boolean agg_isNull6 = false;
+               long agg_value6 = -1L;
+               if (!false) {
+                 agg_value6 = (long) 0;
+               }
+               if (!agg_isNull6) {
+                 agg_isNull4 = false;
+                 agg_value4 = agg_value6;
+               }
+             }
+             /* cast(UnscaledValue(input[3, decimal(7,2)]) as bigint) */
+             /* UnscaledValue(input[3, decimal(7,2)]) */
+             boolean rddScan_isNull1 = rddScan_row.isNullAt(1);
+             Decimal rddScan_value1 = rddScan_isNull1 ? null : (rddScan_row.getDecimal(0, 7, 2));
+
+             boolean agg_isNull9 = rddScan_isNull1;
+             long agg_value9 = -1L;
+
+             if (!rddScan_isNull1) {
+               agg_value9 = rddScan_value1.toUnscaledLong();
+             }
+             boolean agg_isNull8 = agg_isNull9;
+             long agg_value8 = -1L;
+             if (!agg_isNull9) {
+               agg_value8 = agg_value9;
+             }
+             if (!agg_isNull8) {
+               agg_isNull3 = false; // resultCode could change nullability.
+               agg_value3 = agg_value4 + agg_value8;
+             }
+             boolean agg_isNull2 = agg_isNull3;
+             long agg_value2 = agg_value3;
+
+             if (agg_isNull2) {
+               /* input[0, bigint] */
+               boolean agg_isNull11 = agg_aggBuffer.isNullAt(0);
+               long agg_value11 = agg_isNull11 ? -1L : (agg_aggBuffer.getLong(0));
+               if (!agg_isNull11) {
+                 agg_isNull2 = false;
+                 agg_value2 = agg_value11;
+               }
+             }
+             // update aggregate buffer
+             if (!agg_isNull2) {
+               agg_aggBuffer.setLong(0, agg_value2);
+             } else {
+               agg_aggBuffer.setNullAt(0);
+             }
+          }
 
           $iterTerm = $thisPlan.finishAggregate($hashMapTerm, $sorterTerm);
+          long endTime = System.currentTimeMillis();
+          //System.out.println("Pipeline took " + (endTime - startTimeMs));
         }
        """)
+    } else {
+      ctx.addNewFunction(doAgg,
+        s"""
+        private void $doAgg() throws java.io.IOException {
+          if (startTimeMs == -1) startTimeMs = System.currentTimeMillis();
+          ${child.asInstanceOf[CodegenSupport].produce(ctx, this)}
+          $iterTerm = $thisPlan.finishAggregate($hashMapTerm, $sorterTerm);
+          long endTime = System.currentTimeMillis();
+          System.out.println("Pipeline took " + (endTime - startTimeMs));
+        }
+        """)
+    }
 
     // generate code for output
     val keyTerm = ctx.freshName("aggKey")
