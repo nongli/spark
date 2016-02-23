@@ -36,6 +36,7 @@ import org.apache.parquet.schema.OriginalType;
 import org.apache.parquet.schema.PrimitiveType;
 import org.apache.parquet.schema.Type;
 
+import org.apache.spark.TaskContext;
 import org.apache.spark.memory.MemoryMode;
 import org.apache.spark.sql.catalyst.InternalRow;
 import org.apache.spark.sql.catalyst.expressions.UnsafeRow;
@@ -210,19 +211,27 @@ public class UnsafeRowParquetRecordReader extends SpecificParquetRecordReaderBas
     return columnarBatch;
   }
 
+  int numBatches = 0;
   /**
    * Advances to the next batch of rows. Returns false if there are no more.
    */
   public boolean nextBatch() throws IOException {
     assert(vectorizedDecode());
     columnarBatch.reset();
-    if (rowsReturned >= totalRowCount) return false;
+    if (rowsReturned >= totalRowCount) {
+      TaskContext.get().events().addEvent("Parquet done total batches=" + numBatches);
+      return false;
+    }
     checkEndOfRowGroup();
 
     int num = (int)Math.min((long) columnarBatch.capacity(), totalCountLoadedSoFar - rowsReturned);
     for (int i = 0; i < columnReaders.length; ++i) {
       columnReaders[i].readBatch(num, columnarBatch.column(i));
     }
+    if (numBatches == 1) {
+      TaskContext.get().events().addEvent("First parquet batch");
+    }
+    ++numBatches;
     rowsReturned += num;
     columnarBatch.setNumRows(num);
     numBatched = num;

@@ -27,7 +27,7 @@ import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.memory.TaskMemoryManager
 import org.apache.spark.metrics.MetricsSystem
 import org.apache.spark.serializer.SerializerInstance
-import org.apache.spark.util.{ByteBufferInputStream, ByteBufferOutputStream, Utils}
+import org.apache.spark.util.{EventTimeLine, ByteBufferInputStream, ByteBufferOutputStream, Utils}
 
 /**
  * A unit of execution. We have two kinds of Task's in Spark:
@@ -64,6 +64,8 @@ private[spark] abstract class Task[T](
       taskAttemptId: Long,
       attemptNumber: Int,
       metricsSystem: MetricsSystem): T = {
+    eventTimeline = new EventTimeLine("Task " + stageId + ":" + partitionId)
+    eventTimeline.addEvent("Task.run() start")
     context = new TaskContextImpl(
       stageId,
       partitionId,
@@ -73,12 +75,16 @@ private[spark] abstract class Task[T](
       metricsSystem,
       initialAccumulators)
     TaskContext.setTaskContext(context)
+    TaskContext.get().setEventTimeline(eventTimeline)
     taskThread = Thread.currentThread()
     if (_killed) {
       kill(interruptThread = false)
     }
     try {
-      runTask(context)
+      eventTimeline.addEvent("Task.runTask start")
+      val t = runTask(context)
+      eventTimeline.addEvent("Task.runTask done")
+      t
     } finally {
       context.markTaskCompleted()
       try {
@@ -94,9 +100,13 @@ private[spark] abstract class Task[T](
         }
       } finally {
         TaskContext.unset()
+        eventTimeline.addEvent("Task.run() done")
+        println(eventTimeline.eventString())
       }
     }
   }
+
+  @transient var eventTimeline: EventTimeLine = _
 
   private var taskMemoryManager: TaskMemoryManager = _
 

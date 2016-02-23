@@ -1076,6 +1076,7 @@ object ParquetReadBenchmark {
     sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "true")
 
     val benchmark = new Benchmark("TPCDS Snappy", 28800501 * 4, 1)
+
     tpcds.filter(q=> q._1 == "q55").foreach( query => {
       benchmark.addCase(query._1) { i =>
         sqlContext.sql(query._2).show(2)

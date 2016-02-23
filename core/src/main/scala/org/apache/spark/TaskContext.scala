@@ -23,7 +23,7 @@ import org.apache.spark.annotation.DeveloperApi
 import org.apache.spark.executor.TaskMetrics
 import org.apache.spark.memory.TaskMemoryManager
 import org.apache.spark.metrics.source.Source
-import org.apache.spark.util.TaskCompletionListener
+import org.apache.spark.util.{EventTimeLine, TaskCompletionListener}
 
 
 object TaskContext {
@@ -159,5 +159,11 @@ abstract class TaskContext extends Serializable {
    * deserializing in executors.
    */
   private[spark] def registerAccumulator(a: Accumulable[_, _]): Unit
+
+  private[spark] def setEventTimeline(e: EventTimeLine): Unit = {
+    events = e
+  }
+
+  var events: EventTimeLine = _
 
 }

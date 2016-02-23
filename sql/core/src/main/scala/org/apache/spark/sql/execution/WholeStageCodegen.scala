@@ -19,7 +19,7 @@ package org.apache.spark.sql.execution
 
 import scala.collection.mutable.ArrayBuffer
 
-import org.apache.spark.broadcast
+import org.apache.spark.{TaskContext, broadcast}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SQLContext
 import org.apache.spark.sql.catalyst.InternalRow
@@ -285,12 +285,17 @@ case class WholeStageCodegen(plan: CodegenSupport, children: Seq[SparkPlan])
     CodeGenerator.compile(cleanedSource)
 
     plan.upstream().mapPartitions { iter =>
-
+      TaskContext.get().events.addEvent("Start pipeline")
       val clazz = CodeGenerator.compile(source)
       val buffer = clazz.generate(references).asInstanceOf[BufferedRowIterator]
       buffer.setInput(iter)
+      TaskContext.get().events.addEvent("Compiled pipeline")
       new Iterator[InternalRow] {
-        override def hasNext: Boolean = buffer.hasNext
+        override def hasNext: Boolean = {
+          val v = buffer.hasNext
+          if (!v) TaskContext.get().events.addEvent("Done pipeline")
+          v
+        }
         override def next: InternalRow = buffer.next()
       }
     }

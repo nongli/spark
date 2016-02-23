@@ -70,11 +70,16 @@ private[spark] class ShuffleMapTask(
     _executorDeserializeTime = System.currentTimeMillis() - deserializeStartTime
 
     metrics = Some(context.taskMetrics)
+    eventTimeline.addEvent("task deserialized")
     var writer: ShuffleWriter[Any, Any] = null
     try {
       val manager = SparkEnv.get.shuffleManager
       writer = manager.getWriter[Any, Any](dep.shuffleHandle, partitionId, context)
+
+      eventTimeline.addEvent("running task")
       writer.write(rdd.iterator(partition, context).asInstanceOf[Iterator[_ <: Product2[Any, Any]]])
+
+      eventTimeline.addEvent("task done")
       writer.stop(success = true).get
     } catch {
       case e: Exception =>
