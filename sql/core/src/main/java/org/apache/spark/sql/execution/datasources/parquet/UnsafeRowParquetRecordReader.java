@@ -58,9 +58,9 @@ import static org.apache.parquet.column.ValuesType.*;
  * TODO: handle complex types, decimal requiring more than 8 bytes, INT96. Schema mismatch.
  * All of these can be handled efficiently and easily with codegen.
  */
-public class UnsafeRowParquetRecordReader extends SpecificParquetRecordReaderBase<InternalRow> {
+public class UnsafeRowParquetRecordReader extends SpecificParquetRecordReaderBase<Object> {
   /**
-   * Batch of unsafe rows that we assemble and the current index we've returned. Everytime this
+   * Batch of unsafe rows that we assemble and the current index we've returned. Every time this
    * batch is used up (batchIdx == numBatched), we populated the batch.
    */
   private UnsafeRow[] rows = new UnsafeRow[64];
@@ -169,21 +169,19 @@ public class UnsafeRowParquetRecordReader extends SpecificParquetRecordReaderBas
 
   @Override
   public boolean nextKeyValue() throws IOException, InterruptedException {
+    if (vectorizedDecode()) return nextBatch();
+
     if (batchIdx >= numBatched) {
-      if (vectorizedDecode()) {
-        if (!nextBatch()) return false;
-      } else {
-        if (!loadBatch()) return false;
-      }
+      if (!loadBatch()) return false;
     }
     ++batchIdx;
     return true;
   }
 
   @Override
-  public InternalRow getCurrentValue() throws IOException, InterruptedException {
+  public Object getCurrentValue() throws IOException, InterruptedException {
     if (vectorizedDecode()) {
-      return columnarBatch.getRow(batchIdx - 1);
+      return columnarBatch;
     } else {
       return rows[batchIdx - 1];
     }

@@ -21,6 +21,7 @@ import java.io.File
 import scala.collection.JavaConverters._
 import scala.util.Try
 
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.{SparkConf, SparkContext}
 import org.apache.spark.sql.{SQLConf, SQLContext}
 import org.apache.spark.util.{Benchmark, Utils}
@@ -101,7 +102,7 @@ object ParquetReadBenchmark {
             reader.initialize(p, ("id" :: Nil).asJava)
 
             while (reader.nextKeyValue()) {
-              val record = reader.getCurrentValue
+              val record = reader.getCurrentValue.asInstanceOf[InternalRow]
               if (!record.isNullAt(0)) sum += record.getInt(0)
             }
             reader.close()
@@ -212,7 +213,7 @@ object ParquetReadBenchmark {
             val reader = new UnsafeRowParquetRecordReader
             reader.initialize(p, null)
             while (reader.nextKeyValue()) {
-              val record = reader.getCurrentValue
+              val record = reader.getCurrentValue.asInstanceOf[InternalRow]
               if (!record.isNullAt(0)) sum1 += record.getInt(0)
               if (!record.isNullAt(1)) sum2 += record.getUTF8String(1).numBytes()
             }
@@ -1075,7 +1076,7 @@ object ParquetReadBenchmark {
     sqlContext.conf.setConfString(SQLConf.PARQUET_VECTORIZED_READER_ENABLED.key, "true")
     sqlContext.conf.setConfString(SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, "true")
 
-    val benchmark = new Benchmark("TPCDS Snappy", 28800501 * 4, 1)
+    val benchmark = new Benchmark("TPCDS Snappy", 28800501 * 4, 5)
     tpcds.filter(q=> q._1 == "q55").foreach( query => {
       benchmark.addCase(query._1) { i =>
         sqlContext.sql(query._2).show(2)
