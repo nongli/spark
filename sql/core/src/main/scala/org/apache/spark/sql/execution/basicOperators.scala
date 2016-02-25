@@ -22,7 +22,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCode, ExpressionCanonicalizer}
 import org.apache.spark.sql.catalyst.plans.physical._
-import org.apache.spark.sql.execution.metric.{LongSQLMetricValue, SQLMetrics}
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.types.LongType
 import org.apache.spark.util.random.PoissonSampler
 
@@ -77,23 +77,95 @@ case class Filter(condition: Expression, child: SparkPlan) extends UnaryNode wit
     child.asInstanceOf[CodegenSupport].produce(ctx, this)
   }
 
-  override def doConsume(ctx: CodegenContext, input: Seq[ExprCode]): String = {
-    val numOutput = metricTerm(ctx, "numOutputRows")
-    val expr = ExpressionCanonicalizer.execute(
-      BindReferences.bindReference(condition, child.output))
-    ctx.currentVars = input
-    val eval = expr.gen(ctx)
-    val nullCheck = if (expr.nullable) {
-      s"!${eval.isNull} &&"
-    } else {
-      s""
+  private def findNonNullableAttributes(attributeSet: AttributeSet, c: Expression): AttributeSet = {
+    if (c.isInstanceOf[EqualNullSafe]) return attributeSet
+    var result = attributeSet
+    c match {
+      case BinaryComparison(a: Attribute, b: Attribute) => {
+        if (!result.contains(a)) result = result + a
+        if (!result.contains(b)) result = result + b
+      }
+      case BinaryComparison(a: Attribute, b: Literal) => {
+        if (!result.contains(a)) result = result + a
+      }
+      case BinaryComparison(a: Literal, b: Attribute) => {
+        if (!result.contains(b)) result = result + b
+      }
+      case _ =>
     }
+    result
+  }
+
+  private def simplifyConjuncts(): Seq[Expression] = {
+    val conjuncts = splitConjunctivePredicates(condition)
+    var nonNullable = AttributeSet.empty
+    conjuncts.foreach { c =>
+      nonNullable = findNonNullableAttributes(nonNullable, c)
+    }
+
+    val newConjuncts = conjuncts.map { c => c transform {
+      case e @ EqualTo(a: Attribute, b: Literal) => {
+        if (nonNullable.contains(a)) {
+          EqualTo(a.withNullability(false), b)
+        } else {
+          e
+        }
+      }
+      case e @ GreaterThanOrEqual(a: Attribute, b: Literal) => {
+        if (nonNullable.contains(a)) {
+          GreaterThanOrEqual(a.withNullability(false), b)
+        } else {
+          e
+        }
+      }
+      case e @ LessThanOrEqual(a: Attribute, b: Literal) => {
+        if (nonNullable.contains(a)) {
+          LessThanOrEqual(a.withNullability(false), b)
+        } else {
+          e
+        }
+      }
+    }}
+    nonNullable.map(a => IsNotNull(a)).toSeq ++ newConjuncts
+  }
+
+  private def splitConjunctivePredicates(condition: Expression): Seq[Expression] = {
+    condition match {
+      case And(cond1, cond2) =>
+        splitConjunctivePredicates(cond1) ++ splitConjunctivePredicates(cond2)
+      case other => other :: Nil
+    }
+  }
+
+  override def doConsume(ctx: CodegenContext, input: Seq[ExprCode]): String = {
+    ctx.currentVars = input
+    val conjuncts = simplifyConjuncts()
+
+    val generatedConjuncts = conjuncts.map { c =>
+      val e = ExpressionCanonicalizer.execute(BindReferences.bindReference(c, child.output))
+      assert(e.isInstanceOf[Predicate])
+      val generated = e.gen(ctx)
+
+      val nullCheckCode = if (c.nullable) {
+        "if (${generated.isNull}) continue;"
+      } else {
+        ""
+      }
+
+      s"""
+         | ${generated.code}
+         | $nullCheckCode
+         | if (!${generated.value}) continue;
+     """.stripMargin
+    }
+
+    val numOutput = metricTerm(ctx, "numOutputRows")
     s"""
-       | ${eval.code}
-       | if ($nullCheck ${eval.value}) {
-       |   $numOutput.add(1);
-       |   ${consume(ctx, ctx.currentVars)}
-       | }
+       | /* Start filter */
+       | ${generatedConjuncts.mkString("\n")}
+       | $numOutput.add(1);
+       | /* End filter */
+       | ${consume(ctx, ctx.currentVars)}
      """.stripMargin
   }
 

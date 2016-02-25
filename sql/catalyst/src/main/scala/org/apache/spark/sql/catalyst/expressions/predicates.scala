@@ -347,6 +347,8 @@ case class Or(left: Expression, right: Expression) extends BinaryOperator with P
 
 abstract class BinaryComparison extends BinaryOperator with Predicate {
 
+  override def nullable: Boolean = left.nullable || right.nullable
+
   override def genCode(ctx: CodegenContext, ev: ExprCode): String = {
     if (ctx.isPrimitiveType(left.dataType)
         && left.dataType != BooleanType // java boolean doesn't support > or < operator
